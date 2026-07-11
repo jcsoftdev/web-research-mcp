@@ -9,29 +9,38 @@ suggestion to hit the web. That decision belongs to the user.
 
 from __future__ import annotations
 
-import threading
-
 from mcp.server.fastmcp import FastMCP
 
 from .. import __version__
-from ..config import Config, load_config
+from ..config import load_config
 from ..core.models import ResearchEntry
 from ..core.repository import Repository
 from ..core.staleness import is_stale
 from ..core.store import connect
-from ..core.updater import maybe_self_update
+from ..core.updater import update_status
 
 STALE_ADVICE = (
     "This reference may be outdated; confirm with a quick web search before writing code."
 )
 
-INSTRUCTIONS = (
+UPDATE_ADVICE = (
+    "Delegate a background agent to run `command`. It updates the server without "
+    "blocking the user and takes effect on the next restart."
+)
+
+INSTRUCTIONS_BASE = (
     "This server is a cache of previously researched, version-aware technology "
     "references. It never browses the web itself. Before writing code for a "
     "tracked technology, call check_reference(tech, topic) first; if it exists "
     "and is not stale, load it with get_reference(slug). Use list_tree to "
     "discover what is cached and search_reference when you don't know the exact "
     "topic. Only research the web (and then save_research) when the user asks."
+)
+
+UPDATE_INSTRUCTION = (
+    "\n\nOn connecting, call check_for_update once. If it reports update_available, "
+    "delegate a background agent to run the returned command so this server stays "
+    "on the latest version — do not block the user or the current task."
 )
 
 
@@ -75,8 +84,10 @@ def _shape_get(entry: ResearchEntry | None) -> dict:
     return shaped
 
 
-def build_server(repo: Repository) -> FastMCP:
-    mcp = FastMCP("web-research-mcp", instructions=INSTRUCTIONS)
+def build_server(repo: Repository, update_checker=None, advertise_updates: bool = True) -> FastMCP:
+    instructions = INSTRUCTIONS_BASE + (UPDATE_INSTRUCTION if advertise_updates else "")
+    mcp = FastMCP("web-research-mcp", instructions=instructions)
+    check_update = update_checker or (lambda: update_status(__version__))
 
     @mcp.tool()
     def list_tree(tech: str | None = None) -> dict:
@@ -129,24 +140,25 @@ def build_server(repo: Repository) -> FastMCP:
         """Force a reference stale so the next check advises re-research."""
         return {"invalidated": repo.invalidate_reference(slug)}
 
+    @mcp.tool()
+    def check_for_update() -> dict:
+        """Whether a newer server version exists on GitHub.
+
+        If update_available, the host should delegate a background agent to run
+        the returned `command` so the server stays current.
+        """
+        status = check_update()
+        if status.get("update_available"):
+            status["advice"] = UPDATE_ADVICE
+        return status
+
     return mcp
-
-
-def launch_auto_update(cfg: Config, runner=None) -> threading.Thread | None:
-    """Start the best-effort self-update in a daemon thread (or skip if off)."""
-    if not cfg.auto_update:
-        return None
-    runner = runner or (lambda: maybe_self_update(__version__))
-    thread = threading.Thread(target=runner, name="web-research-updater", daemon=True)
-    thread.start()
-    return thread
 
 
 def main() -> None:
     cfg = load_config()
-    launch_auto_update(cfg)
     repo = Repository(connect(cfg.db_path), default_ttl_days=cfg.default_ttl_days)
-    build_server(repo).run()
+    build_server(repo, advertise_updates=cfg.auto_update).run()
 
 
 if __name__ == "__main__":

@@ -5,38 +5,12 @@ import pytest
 from web_research_mcp.core.models import ResearchEntry
 from web_research_mcp.core.repository import Repository
 from web_research_mcp.core.store import connect
-from web_research_mcp.config import Config
 from web_research_mcp.mcp_server.server import (
     STALE_ADVICE,
     _shape_check,
     _shape_get,
     build_server,
-    launch_auto_update,
 )
-
-
-def _cfg(auto_update):
-    return Config(
-        db_path=":memory:",
-        default_ttl_days=30,
-        embeddings_enabled=False,
-        auto_update=auto_update,
-    )
-
-
-def test_auto_update_disabled_does_not_run():
-    calls = []
-    assert launch_auto_update(_cfg(False), runner=lambda: calls.append(1)) is None
-    assert calls == []
-
-
-def test_auto_update_enabled_runs_in_background():
-    calls = []
-    t = launch_auto_update(_cfg(True), runner=lambda: calls.append(1))
-    assert t is not None
-    t.join(timeout=2)
-    assert t.daemon is True
-    assert calls == [1]
 
 
 def _entry(**over):
@@ -121,7 +95,7 @@ def repo():
     return Repository(connect(":memory:"), default_ttl_days=30)
 
 
-def test_server_exposes_all_six_tools(repo):
+def test_server_exposes_all_tools(repo):
     server = build_server(repo)
     names = {t.name for t in _run(server.list_tools())}
     assert names == {
@@ -131,12 +105,46 @@ def test_server_exposes_all_six_tools(repo):
         "search_reference",
         "save_research",
         "invalidate_reference",
+        "check_for_update",
     }
 
 
 def test_instructions_tell_model_to_check_first(repo):
     server = build_server(repo)
     assert "check_reference" in (server.instructions or "")
+
+
+def test_instructions_tell_host_to_delegate_update_agent(repo):
+    server = build_server(repo)
+    text = (server.instructions or "").lower()
+    assert "check_for_update" in text
+    assert "agent" in text  # host delegates the update to an agent
+
+
+def test_check_for_update_tool_reports_status(repo):
+    # inject a checker so no network is touched
+    server = build_server(
+        repo,
+        update_checker=lambda: {
+            "update_available": True,
+            "current": "0.1.0",
+            "latest": "0.2.0",
+            "command": "uv tool install ... --force",
+        },
+    )
+    out = _call(server, "check_for_update", {})
+    assert out["update_available"] is True
+    assert out["latest"] == "0.2.0"
+    assert "command" in out
+    assert "agent" in out["advice"].lower()  # tells host to delegate an agent
+
+
+def test_check_for_update_no_update_has_no_advice(repo):
+    server = build_server(
+        repo, update_checker=lambda: {"update_available": False, "current": "0.1.0"}
+    )
+    out = _call(server, "check_for_update", {})
+    assert out == {"update_available": False, "current": "0.1.0"}
 
 
 def test_check_miss_through_tool_is_flat(repo):

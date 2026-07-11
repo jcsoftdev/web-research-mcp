@@ -1,4 +1,9 @@
-from web_research_mcp.core.updater import check_for_update, parse_remote_version
+from web_research_mcp.core.updater import (
+    UPDATE_COMMAND,
+    check_for_update,
+    parse_remote_version,
+    update_status,
+)
 
 
 def test_parse_double_quoted_version():
@@ -34,3 +39,23 @@ def test_fetch_error_is_swallowed():
 
 def test_unparseable_remote_is_none():
     assert check_for_update("0.1.0", fetch=lambda: "garbage") is None
+
+
+def test_update_status_available_includes_command():
+    st = update_status("0.1.0", fetch=lambda: '__version__ = "0.2.0"')
+    assert st["update_available"] is True
+    assert st["latest"] == "0.2.0"
+    assert st["current"] == "0.1.0"
+    assert st["command"] == UPDATE_COMMAND
+
+
+def test_update_status_none_when_current():
+    st = update_status("0.2.0", fetch=lambda: '__version__ = "0.2.0"')
+    assert st == {"update_available": False, "current": "0.2.0"}
+
+
+def test_update_status_none_on_fetch_error():
+    def boom():
+        raise OSError
+
+    assert update_status("0.1.0", fetch=boom)["update_available"] is False
