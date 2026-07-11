@@ -72,6 +72,36 @@ creating a duplicate. It is **advisory, non-blocking**. Matching is lexical toda
 abbreviations (`rsc` vs `server-components`) need embeddings, which swap in at the
 same call site via `EmbeddingProvider` when `EMBEDDINGS_ENABLED=1`.
 
+## Enforcement hook (optional)
+
+The MCP `instructions` only *ask* the model to call `check_reference` before
+writing code — nothing enforces it. The installer can wire a host **pre-edit
+hook** that turns the ask into a guarantee: if you are about to edit code for a
+cached tech and the current session never consulted its reference, the edit is
+**denied** until you do.
+
+```bash
+web-research-mcp hook --host {claude|codex|gemini|cursor}
+```
+
+The hook reads the host's pre-edit event on stdin, detects tracked techs in the
+edit via strong signals only (real JS/TS imports or `package.json` dependency
+keys — never prose), and checks the session transcript for a prior
+`check_reference` / `get_reference` call. Detection is conservative by design: a
+false deny blocks a legitimate edit.
+
+Install is **opt-in** (default no) because a deny is disruptive. Support:
+
+| host | event | status |
+|---|---|---|
+| Claude Code | `PreToolUse` matcher `Edit\|Write`, deny via exit 2 | verified |
+| Codex | `PreToolUse` (Bash-scoped — misses `apply_patch` edits) | experimental |
+| Gemini CLI | `BeforeTool` | experimental (schema unverified) |
+| Cursor | `beforeShellExecution` + `beforeMCPExecution` (no pre-edit block) | experimental |
+
+The hook **fails open**: any parse error, unknown host, or unreadable DB allows
+the edit — a bug in the gate must never wedge your editor.
+
 ## Config (env vars)
 
 | var | default | purpose |

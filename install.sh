@@ -207,7 +207,91 @@ for idx in ${SELECTED[@]+"${SELECTED[@]}"}; do
   esac
 done
 
-# ---- 6. verify ---------------------------------------------------------------
+# ---- 6. optional enforcement hook -------------------------------------------
+# Blocks editing code for a cached tech until its reference was consulted this
+# session. Opt-in (default no) because a deny is disruptive. Claude Code is
+# fully supported and verified; the others use their documented 2026 hook
+# schemas and are best-effort until validated against your host version.
+hook_host_key() {  # map a host label to its hook adapter key ("" = no hooks)
+  case "$1" in
+    "Claude Code") printf 'claude' ;;
+    "Codex")       printf 'codex'  ;;
+    "Gemini")      printf 'gemini' ;;
+    "Cursor")      printf 'cursor' ;;
+    *)             printf '' ;;
+  esac
+}
+
+hook_merge() {  # hook_merge <host_key> <bin>
+  python3 - "$1" "$2" <<'PY'
+import json, os, sys
+host, binp = sys.argv[1], sys.argv[2]
+cmd = f"{binp} hook --host {host}"
+HOME = os.path.expanduser("~")
+# (config path, layout, event, matcher)
+SPECS = {
+    "claude": (f"{HOME}/.claude/settings.json", "pretool", "PreToolUse", "Edit|Write"),
+    "codex":  (f"{HOME}/.codex/hooks.json",     "pretool", "PreToolUse", "Bash"),
+    "gemini": (f"{HOME}/.gemini/settings.json", "pretool", "BeforeTool", "*"),
+    "cursor": (f"{HOME}/.cursor/hooks.json",    "cursor",  None,         None),
+}
+path, layout, event, matcher = SPECS[host]
+os.makedirs(os.path.dirname(path), exist_ok=True)
+data = {}
+if os.path.exists(path):
+    try:
+        with open(path) as f:
+            data = json.load(f) or {}
+    except json.JSONDecodeError:
+        raise SystemExit(f"existing config is not valid JSON: {path}")
+
+def has_cmd(blob):
+    return cmd in json.dumps(blob)
+
+if layout == "pretool":
+    # Claude/Codex/Gemini share the matcher+hooks list shape under an events map.
+    events = data.setdefault("hooks", {})
+    entries = events.setdefault(event, [])
+    if not has_cmd(entries):
+        entries.append({"matcher": matcher,
+                        "hooks": [{"type": "command", "command": cmd}]})
+elif layout == "cursor":
+    # Cursor cannot block a raw file write pre-hoc; guard the surfaces it can:
+    # shell and MCP tool execution.
+    data.setdefault("version", 1)
+    hooks = data.setdefault("hooks", {})
+    for ev in ("beforeShellExecution", "beforeMCPExecution"):
+        lst = hooks.setdefault(ev, [])
+        if not has_cmd(lst):
+            lst.append({"command": cmd})
+
+with open(path, "w") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+print(path)
+PY
+}
+
+if [ "${#SELECTED[@]}" -gt 0 ]; then
+  printf '\n%s %s\n' "${BOLD}Enforcement hook${RST}" "${DIM}(optional)${RST}"
+  printf '%s\n' "${DIM}Blocks editing code for a cached tech until you call check_reference.${RST}"
+  printf '%s\n' "${DIM}Claude Code: verified. Codex/Gemini/Cursor: experimental (unverified schema).${RST}"
+  HOOK="$(ask 'Install enforcement hook? y/N' 'N')"
+  case "$HOOK" in
+    y|Y|yes|YES)
+      for idx in ${SELECTED[@]+"${SELECTED[@]}"}; do
+        hk="$(hook_host_key "${H_LABEL[$idx]}")"
+        [ -n "$hk" ] || { warn "no hook support → ${H_LABEL[$idx]} (skipped)"; continue; }
+        p="$(hook_merge "$hk" "$BIN")" \
+          && ok "hook → ${H_LABEL[$idx]} ${DIM}($p)${RST}" \
+          || warn "hook failed → ${H_LABEL[$idx]}"
+      done
+      ;;
+    *) info "skipped enforcement hook (register later, see README)" ;;
+  esac
+fi
+
+# ---- 7. verify ---------------------------------------------------------------
 printf '\n'
 if printf '' | "$BIN" >/dev/null 2>&1; then
   ok "server boots"

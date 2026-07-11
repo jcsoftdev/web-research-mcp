@@ -186,6 +186,15 @@ def build_server(repo: Repository, update_checker=None, advertise_updates: bool 
 
 
 def main() -> None:
+    import sys
+
+    # `web-research-mcp hook --host <name>` runs the pre-edit enforcement hook
+    # instead of starting the MCP server (which owns stdio for JSON-RPC).
+    if len(sys.argv) > 1 and sys.argv[1] == "hook":
+        from . import hook
+
+        raise SystemExit(hook.main(sys.argv[2:]))
+
     cfg = load_config()
     repo = Repository(connect(cfg.db_path), default_ttl_days=cfg.default_ttl_days)
     build_server(repo, advertise_updates=cfg.auto_update).run()
