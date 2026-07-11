@@ -1,0 +1,30 @@
+[project]
+name = "web-research-mcp"
+version = "0.1.0"
+description = "MCP server that caches version-aware web research so the host model writes modern, non-deprecated code without re-researching every session."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+    { name = "jcsoftdev" }
+]
+dependencies = [
+    "mcp>=1.2.0",
+    "packaging>=23.0",
+]
+
+[project.scripts]
+web-research-mcp = "web_research_mcp.mcp_server.server:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[build-system]
+requires = ["uv_build>=0.11.26,<0.12.0"]
+build-backend = "uv_build"

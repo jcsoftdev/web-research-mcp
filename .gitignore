@@ -1,0 +1,15 @@
+# superpowers workflow artifacts (kept local)
+docs/superpowers/specs/
+
+# local tooling caches / indexes
+.project-brain/
+.atl/
+
+# python / uv
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# local server DB
+.web-research-mcp/
