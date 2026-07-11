@@ -12,7 +12,8 @@ from datetime import datetime, timezone
 
 from .embeddings import EmbeddingProvider, NullProvider
 from .models import ResearchEntry
-from .slug import make_slug
+from .similarity import find_duplicates
+from .slug import make_slug, normalize_segment
 from .staleness import is_stale
 from .versioning import is_newer
 
@@ -196,6 +197,37 @@ class Repository:
             }
             for t, versions in techs.items()
         ]
+
+    def find_similar_topics(
+        self, tech: str, topic: str, threshold: float = 0.6
+    ) -> list[dict]:
+        """Existing topics for ``tech`` that look like duplicates of ``topic``.
+
+        Lexical for now; when embeddings are enabled this is where vector
+        similarity swaps in (same signature, same call site).
+        """
+        tech_n = normalize_segment(tech)
+        topic_n = normalize_segment(topic)
+        rows = self.conn.execute(
+            "SELECT slug, topic, version, is_latest FROM research_entries "
+            "WHERE tech = ? ORDER BY is_latest DESC, version DESC",
+            (tech_n,),
+        ).fetchall()
+        candidates: list[dict] = []
+        seen: set[str] = set()
+        for r in rows:
+            if r["topic"] in seen:
+                continue
+            seen.add(r["topic"])
+            candidates.append(
+                {
+                    "slug": r["slug"],
+                    "topic": r["topic"],
+                    "version": r["version"],
+                    "is_latest": bool(r["is_latest"]),
+                }
+            )
+        return find_duplicates(topic_n, candidates, threshold)
 
     # ---- writes ----
 

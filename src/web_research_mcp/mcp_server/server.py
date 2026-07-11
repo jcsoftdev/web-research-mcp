@@ -34,7 +34,9 @@ INSTRUCTIONS_BASE = (
     "tracked technology, call check_reference(tech, topic) first; if it exists "
     "and is not stale, load it with get_reference(slug). Use list_tree to "
     "discover what is cached and search_reference when you don't know the exact "
-    "topic. Only research the web (and then save_research) when the user asks."
+    "topic. Only research the web (and then save_research) when the user asks. "
+    "When save_research returns possible_duplicates, reuse an existing slug "
+    "instead of forking a near-duplicate topic name."
 )
 
 UPDATE_INSTRUCTION = (
@@ -141,7 +143,12 @@ def build_server(repo: Repository, update_checker=None, advertise_updates: bool 
 
         Only tech/topic/summary/content are required. Omit version for a general
         (not version-bound) reference; status_tag defaults to "current".
+
+        Response includes ``possible_duplicates`` when a similar topic already
+        exists for this tech — reuse or consolidate instead of forking naming.
         """
+        # Detect look-alike topics against existing state before inserting.
+        dups = repo.find_similar_topics(tech, topic)
         entry = repo.save_research(
             tech=tech,
             version=_coerce_version(version),
@@ -153,7 +160,10 @@ def build_server(repo: Repository, update_checker=None, advertise_updates: bool 
             version_locked=version_locked,
             tags=tags,
         )
-        return {"slug": entry.slug, "is_latest": entry.is_latest, "saved": True}
+        result = {"slug": entry.slug, "is_latest": entry.is_latest, "saved": True}
+        if dups:
+            result["possible_duplicates"] = dups
+        return result
 
     @mcp.tool()
     def invalidate_reference(slug: str) -> dict:

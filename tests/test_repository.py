@@ -182,6 +182,39 @@ def test_list_tree_flags_stale(repo):
     assert topic["is_latest"] is True
 
 
+# ---- dedup: find_similar_topics ----
+
+def test_find_similar_topics_matches_near_spelling(repo):
+    _save(repo, tech="react", version="19", topic="server-components")
+    hits = repo.find_similar_topics("React", "server-component")
+    assert [h["topic"] for h in hits] == ["server-components"]
+    assert hits[0]["slug"] == "react/19/server-components"
+    assert hits[0]["similarity"] >= 0.6
+
+
+def test_find_similar_topics_excludes_exact(repo):
+    _save(repo, tech="react", version="19", topic="server-components")
+    assert repo.find_similar_topics("react", "server-components") == []
+
+
+def test_find_similar_topics_scoped_to_tech(repo):
+    _save(repo, tech="vue", version="3", topic="composition")
+    assert repo.find_similar_topics("react", "compositions") == []
+
+
+def test_find_similar_topics_dedups_across_versions(repo):
+    _save(repo, tech="react", version="18", topic="hooks")
+    _save(repo, tech="react", version="19", topic="hooks")
+    hits = repo.find_similar_topics("react", "hook")
+    assert len(hits) == 1  # one entry per distinct topic
+    assert hits[0]["topic"] == "hooks"
+
+
+def test_find_similar_topics_empty_when_nothing_close(repo):
+    _save(repo, tech="react", version="19", topic="server-components")
+    assert repo.find_similar_topics("react", "routing") == []
+
+
 # ---- invalidate ----
 
 def test_invalidate_forces_stale(repo):

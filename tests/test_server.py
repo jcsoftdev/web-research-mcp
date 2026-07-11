@@ -196,6 +196,30 @@ def test_save_research_accepts_string_sources(repo):
     assert got["sources"] == ["https://react.dev"]
 
 
+def test_save_flags_possible_duplicate(repo):
+    server = build_server(repo)
+    _call(server, "save_research", {
+        "tech": "react", "version": "19", "topic": "server-components",
+        "summary": "s", "content": "c",
+    })
+    # a second save under a near-duplicate topic name
+    out = _call(server, "save_research", {
+        "tech": "react", "version": "19", "topic": "server-component",
+        "summary": "s", "content": "c",
+    })
+    assert out["saved"] is True  # non-blocking
+    dups = out["possible_duplicates"]
+    assert any(d["slug"] == "react/19/server-components" for d in dups)
+
+
+def test_save_without_duplicate_has_no_key(repo):
+    server = build_server(repo)
+    out = _call(server, "save_research", {
+        "tech": "react", "topic": "hooks", "summary": "s", "content": "c",
+    })
+    assert "possible_duplicates" not in out
+
+
 def test_save_then_check_hit_through_tools(repo):
     server = build_server(repo)
     _call(

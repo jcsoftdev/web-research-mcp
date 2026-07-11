@@ -61,6 +61,17 @@ Freshness is a **structured field** (`status_tag`, `stale`) placed first in ever
 response, and a stale entry carries an explicit `advice` field — the model can't
 overlook deprecation buried in prose. A cache miss is a flat `{"exists": false}`.
 
+### Dedup gate
+
+`save_research` guards against forking the same concept under different topic
+names (`server-components` vs `servercomponents`). Before inserting it looks for
+similar existing topics for that tech and, if any, returns them in a
+`possible_duplicates` field so the host reuses an existing slug instead of
+creating a duplicate. It is **advisory, non-blocking**. Matching is lexical today
+(near-spellings, spacing, truncated abbreviations); synonyms and non-truncation
+abbreviations (`rsc` vs `server-components`) need embeddings, which swap in at the
+same call site via `EmbeddingProvider` when `EMBEDDINGS_ENABLED=1`.
+
 ## Config (env vars)
 
 | var | default | purpose |
