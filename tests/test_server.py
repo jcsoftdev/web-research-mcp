@@ -153,6 +153,49 @@ def test_check_miss_through_tool_is_flat(repo):
     assert out == {"exists": False}
 
 
+def test_check_reference_accepts_numeric_version(repo):
+    server = build_server(repo)
+    _call(server, "save_research", {
+        "tech": "react", "version": "18", "topic": "hooks",
+        "summary": "s", "content": "c", "sources": [], "status_tag": "current",
+    })
+    # model passes 18 as a number, not "18"
+    out = _call(server, "check_reference", {"tech": "react", "topic": "hooks", "version": 18})
+    assert out["exists"] is True
+    assert out["resolved_version"] == "18"
+
+
+def test_save_research_minimal_call(repo):
+    server = build_server(repo)
+    # only the truly essential fields — version/sources/status_tag omitted
+    out = _call(server, "save_research", {
+        "tech": "react", "topic": "hooks", "summary": "s", "content": "c",
+    })
+    assert out["saved"] is True
+    chk = _call(server, "check_reference", {"tech": "react", "topic": "hooks"})
+    assert chk["exists"] is True
+    assert chk["status_tag"] == "current"  # default
+    assert chk["resolved_version"] is None
+
+
+def test_save_research_coerces_numeric_version(repo):
+    server = build_server(repo)
+    out = _call(server, "save_research", {
+        "tech": "react", "version": 18, "topic": "hooks", "summary": "s", "content": "c",
+    })
+    assert out["slug"] == "react/18/hooks"
+
+
+def test_save_research_accepts_string_sources(repo):
+    server = build_server(repo)
+    out = _call(server, "save_research", {
+        "tech": "react", "topic": "hooks", "summary": "s", "content": "c",
+        "sources": "https://react.dev",
+    })
+    got = _call(server, "get_reference", {"slug": out["slug"]})
+    assert got["sources"] == ["https://react.dev"]
+
+
 def test_save_then_check_hit_through_tools(repo):
     server = build_server(repo)
     _call(

@@ -44,6 +44,22 @@ UPDATE_INSTRUCTION = (
 )
 
 
+def _coerce_version(version) -> str | None:
+    """Accept a version as string or number (models often pass 19, not "19")."""
+    if version is None or version == "":
+        return None
+    return str(version)
+
+
+def _coerce_sources(sources) -> list[str]:
+    """Accept sources as a list, a single URL string, or nothing."""
+    if sources is None:
+        return []
+    if isinstance(sources, str):
+        return [sources]
+    return [str(s) for s in sources]
+
+
 def _shape_check(res: dict) -> dict:
     if not res.get("exists"):
         return {"exists": False}
@@ -95,9 +111,9 @@ def build_server(repo: Repository, update_checker=None, advertise_updates: bool 
         return {"tree": repo.list_tree(tech=tech)}
 
     @mcp.tool()
-    def check_reference(tech: str, topic: str, version: str | None = None) -> dict:
+    def check_reference(tech: str, topic: str, version: str | int | float | None = None) -> dict:
         """Cheap existence/freshness check. No content. Omit version for the latest."""
-        return _shape_check(repo.check_reference(tech, topic, version=version))
+        return _shape_check(repo.check_reference(tech, topic, version=_coerce_version(version)))
 
     @mcp.tool()
     def get_reference(slug: str, section: str | None = None) -> dict:
@@ -112,23 +128,27 @@ def build_server(repo: Repository, update_checker=None, advertise_updates: bool 
     @mcp.tool()
     def save_research(
         tech: str,
-        version: str | None,
         topic: str,
         summary: str,
         content: str,
-        sources: list[str],
-        status_tag: str,
+        version: str | int | float | None = None,
+        sources: list[str] | str | None = None,
+        status_tag: str = "current",
         version_locked: bool = False,
         tags: list[str] | None = None,
     ) -> dict:
-        """Store host-researched docs. Supersedes older versions atomically."""
+        """Store host-researched docs. Supersedes older versions atomically.
+
+        Only tech/topic/summary/content are required. Omit version for a general
+        (not version-bound) reference; status_tag defaults to "current".
+        """
         entry = repo.save_research(
             tech=tech,
-            version=version,
+            version=_coerce_version(version),
             topic=topic,
             summary=summary,
             content=content,
-            sources=sources,
+            sources=_coerce_sources(sources),
             status_tag=status_tag,
             version_locked=version_locked,
             tags=tags,
