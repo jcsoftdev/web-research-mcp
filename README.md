@@ -10,6 +10,14 @@ this? is it current?"* cheaply, and serves the cached reference back.
 
 ## Install
 
+One line — no clone needed:
+
+```bash
+curl -LsSf https://raw.githubusercontent.com/jcsoftdev/web-research-mcp/main/install.sh | bash
+```
+
+Or from a checkout:
+
 ```bash
 ./install.sh
 ```

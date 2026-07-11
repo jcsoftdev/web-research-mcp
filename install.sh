@@ -16,8 +16,9 @@
 set -euo pipefail
 
 # macOS ships bash 3.2, which chokes on empty-array expansion under `set -u`.
-# Re-exec under a modern bash if one is available.
-if [ "${BASH_VERSINFO:-0}" -lt 4 ]; then
+# Re-exec under a modern bash if one is available (only when $0 is a real file;
+# under `curl | bash` it isn't, and the empty-array guards below cover 3.2).
+if [ "${BASH_VERSINFO:-0}" -lt 4 ] && [ -f "$0" ]; then
   for b in /opt/homebrew/bin/bash /usr/local/bin/bash; do
     if [ -x "$b" ]; then exec "$b" "$0" "$@"; fi
   done
@@ -26,6 +27,7 @@ fi
 SERVER_NAME="web-research"
 BIN_NAME="web-research-mcp"
 LOCAL_BIN="${XDG_BIN_HOME:-$HOME/.local/bin}"
+REPO_URL="${WEB_RESEARCH_REPO:-https://github.com/jcsoftdev/web-research-mcp.git}"
 
 # ---- pretty output -----------------------------------------------------------
 if [ -t 1 ]; then
@@ -39,7 +41,20 @@ info() { printf '%s\n' "${CYN}▸${RST} $*"; }
 ok()   { printf '%s\n' "${GRN}✓${RST} $*"; }
 warn() { printf '%s\n' "${YEL}!${RST} $*" >&2; }
 die()  { printf '%s\n' "${RED}✗${RST} $*" >&2; exit 1; }
-ask()  { local p="$1" d="${2:-}" a; read -r -p "$(printf '%s' "${BOLD}${p}${RST}${d:+ ${DIM}[$d]${RST}} ")" a || true; printf '%s' "${a:-$d}"; }
+# Can we actually open the terminal? `[ -r /dev/tty ]` lies (perms look fine
+# even when there is no controlling tty), so probe with a real open.
+if { true </dev/tty; } 2>/dev/null; then HAS_TTY=1; else HAS_TTY=0; fi
+
+# Read from the terminal even when the script itself arrives via stdin
+# (curl | bash). No tty -> fall back to the default.
+ask()  {
+  local p="$1" d="${2:-}" a=""
+  local prompt; prompt="$(printf '%s' "${BOLD}${p}${RST}${d:+ ${DIM}[$d]${RST}} ")"
+  if [ "$HAS_TTY" = 1 ]; then
+    read -r -p "$prompt" a </dev/tty || true
+  fi
+  printf '%s' "${a:-$d}"
+}
 
 printf '\n%s\n\n' "${BOLD}web-research-mcp installer${RST}"
 
@@ -53,9 +68,17 @@ fi
 ok "uv $(uv --version | awk '{print $2}')"
 
 # ---- 2. locate source + install ---------------------------------------------
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# Prefer an explicit source, then the dir this script lives in (local run).
+# When piped (curl | bash) neither exists, so clone the repo.
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || true)"
 SRC="${WEB_RESEARCH_SRC:-$SCRIPT_DIR}"
-[ -f "$SRC/pyproject.toml" ] || die "no pyproject.toml at $SRC — run this from the repo or set WEB_RESEARCH_SRC=/path/to/repo"
+if [ -z "$SRC" ] || [ ! -f "$SRC/pyproject.toml" ]; then
+  command -v git >/dev/null 2>&1 || die "git is required to fetch the source; install git or run from a checkout"
+  SRC="$(mktemp -d)/web-research-mcp"
+  info "fetching source from $REPO_URL ..."
+  git clone --depth 1 "$REPO_URL" "$SRC" >/dev/null 2>&1 || die "git clone failed: $REPO_URL"
+fi
+[ -f "$SRC/pyproject.toml" ] || die "no pyproject.toml at $SRC"
 
 info "installing $BIN_NAME from $SRC ..."
 uv tool install --from "$SRC" "$BIN_NAME" --force >/dev/null
@@ -96,7 +119,12 @@ for i in "${!H_LABEL[@]}"; do
   printf '  %s) %-16s %s\n' "$((i+1))" "${H_LABEL[$i]}" "$mark"
 done
 printf '%s\n' "${DIM}Enter numbers (e.g. 1 2), 'all' for every detected host, or blank to skip.${RST}"
-SEL="$(ask 'Select' 'all')"
+if [ "$HAS_TTY" = 1 ]; then
+  SEL="$(ask 'Select' 'all')"
+else
+  SEL=""
+  warn "no terminal available — skipping host registration (register later, see README)"
+fi
 
 SELECTED=()
 if [ "$SEL" = "all" ]; then
