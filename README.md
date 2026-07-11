@@ -68,6 +68,14 @@ overlook deprecation buried in prose. A cache miss is a flat `{"exists": false}`
 | `WEB_RESEARCH_DB_PATH` | `~/.web-research-mcp/research.db` | DB location (global — reused across projects) |
 | `DEFAULT_TTL_DAYS` | `30` | TTL for non-version-locked entries |
 | `EMBEDDINGS_ENABLED` | `0` | vector search (post-MVP) |
+| `WEB_RESEARCH_AUTO_UPDATE` | `1` | background self-update on startup; set `0` to disable |
+
+### Auto-update
+
+On startup the server checks GitHub for a newer version in a background thread
+(non-blocking, best-effort). If one exists it reinstalls itself via
+`uv tool install --force`; the update takes effect on the **next** launch — so you
+always run the latest improvements. Disable with `WEB_RESEARCH_AUTO_UPDATE=0`.
 
 ## Develop
 

@@ -4,13 +4,24 @@ from web_research_mcp.config import load_config
 
 
 def test_defaults(monkeypatch):
-    for var in ("WEB_RESEARCH_DB_PATH", "DEFAULT_TTL_DAYS", "EMBEDDINGS_ENABLED"):
+    for var in (
+        "WEB_RESEARCH_DB_PATH",
+        "DEFAULT_TTL_DAYS",
+        "EMBEDDINGS_ENABLED",
+        "WEB_RESEARCH_AUTO_UPDATE",
+    ):
         monkeypatch.delenv(var, raising=False)
     cfg = load_config()
     assert cfg.db_path.endswith(".web-research-mcp/research.db")
     assert os.path.isabs(cfg.db_path)  # ~ expanded
     assert cfg.default_ttl_days == 30
     assert cfg.embeddings_enabled is False
+    assert cfg.auto_update is True  # always-latest by default
+
+
+def test_auto_update_opt_out(monkeypatch):
+    monkeypatch.setenv("WEB_RESEARCH_AUTO_UPDATE", "0")
+    assert load_config().auto_update is False
 
 
 def test_overrides(monkeypatch):

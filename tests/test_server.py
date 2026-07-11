@@ -5,12 +5,38 @@ import pytest
 from web_research_mcp.core.models import ResearchEntry
 from web_research_mcp.core.repository import Repository
 from web_research_mcp.core.store import connect
+from web_research_mcp.config import Config
 from web_research_mcp.mcp_server.server import (
     STALE_ADVICE,
     _shape_check,
     _shape_get,
     build_server,
+    launch_auto_update,
 )
+
+
+def _cfg(auto_update):
+    return Config(
+        db_path=":memory:",
+        default_ttl_days=30,
+        embeddings_enabled=False,
+        auto_update=auto_update,
+    )
+
+
+def test_auto_update_disabled_does_not_run():
+    calls = []
+    assert launch_auto_update(_cfg(False), runner=lambda: calls.append(1)) is None
+    assert calls == []
+
+
+def test_auto_update_enabled_runs_in_background():
+    calls = []
+    t = launch_auto_update(_cfg(True), runner=lambda: calls.append(1))
+    assert t is not None
+    t.join(timeout=2)
+    assert t.daemon is True
+    assert calls == [1]
 
 
 def _entry(**over):

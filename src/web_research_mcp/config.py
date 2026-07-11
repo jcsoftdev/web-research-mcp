@@ -14,6 +14,7 @@ class Config:
     db_path: str
     default_ttl_days: int
     embeddings_enabled: bool
+    auto_update: bool
 
 
 def load_config() -> Config:
@@ -22,4 +23,10 @@ def load_config() -> Config:
     db_path = os.path.abspath(os.path.expanduser(raw_path))
     ttl = int(os.environ.get("DEFAULT_TTL_DAYS", DEFAULT_TTL_DAYS))
     embeddings = os.environ.get("EMBEDDINGS_ENABLED", "0") == "1"
-    return Config(db_path=db_path, default_ttl_days=ttl, embeddings_enabled=embeddings)
+    auto_update = os.environ.get("WEB_RESEARCH_AUTO_UPDATE", "1") != "0"
+    return Config(
+        db_path=db_path,
+        default_ttl_days=ttl,
+        embeddings_enabled=embeddings,
+        auto_update=auto_update,
+    )

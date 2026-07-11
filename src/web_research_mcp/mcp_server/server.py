@@ -9,13 +9,17 @@ suggestion to hit the web. That decision belongs to the user.
 
 from __future__ import annotations
 
+import threading
+
 from mcp.server.fastmcp import FastMCP
 
-from ..config import load_config
+from .. import __version__
+from ..config import Config, load_config
 from ..core.models import ResearchEntry
 from ..core.repository import Repository
 from ..core.staleness import is_stale
 from ..core.store import connect
+from ..core.updater import maybe_self_update
 
 STALE_ADVICE = (
     "This reference may be outdated; confirm with a quick web search before writing code."
@@ -128,8 +132,19 @@ def build_server(repo: Repository) -> FastMCP:
     return mcp
 
 
+def launch_auto_update(cfg: Config, runner=None) -> threading.Thread | None:
+    """Start the best-effort self-update in a daemon thread (or skip if off)."""
+    if not cfg.auto_update:
+        return None
+    runner = runner or (lambda: maybe_self_update(__version__))
+    thread = threading.Thread(target=runner, name="web-research-updater", daemon=True)
+    thread.start()
+    return thread
+
+
 def main() -> None:
     cfg = load_config()
+    launch_auto_update(cfg)
     repo = Repository(connect(cfg.db_path), default_ttl_days=cfg.default_ttl_days)
     build_server(repo).run()
 
