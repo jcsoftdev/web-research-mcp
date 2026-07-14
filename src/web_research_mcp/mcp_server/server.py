@@ -9,6 +9,9 @@ suggestion to hit the web. That decision belongs to the user.
 
 from __future__ import annotations
 
+import os
+import sys
+
 from mcp.server.fastmcp import FastMCP
 
 from .. import __version__
@@ -44,6 +47,28 @@ UPDATE_INSTRUCTION = (
     "delegate a background agent to run the returned command so this server stays "
     "on the latest version — do not block the user or the current task."
 )
+
+HELP_TEXT = """\
+web-research-mcp — version-aware cache of researched technology docs.
+
+Usage:
+  web-research-mcp                     Start the MCP server (stdio transport).
+  web-research-mcp hook --host <name>  Run the pre-edit enforcement hook.
+                                        <name>: claude | codex | gemini | cursor
+  web-research-mcp help                Show this help.
+  web-research-mcp -h | --help         Same as above.
+
+MCP tools exposed once connected:
+  list_tree(tech?)                                    Cached hierarchy tech -> version -> topics.
+  check_reference(tech, topic, version?)              Cheap existence/freshness check, no content.
+  get_reference(slug, section?)                        Full cached doc for a slug.
+  search_reference(query, tech?)                       Full-text search when the topic is unknown.
+  save_research(tech, topic, summary, content, ...)    Store host-researched docs.
+  invalidate_reference(slug)                           Force a reference stale.
+  check_for_update()                                   Check for a newer server version.
+
+Stop the server with Ctrl+C; it shuts down without a stack trace.
+"""
 
 
 def _coerce_version(version) -> str | None:
@@ -185,19 +210,38 @@ def build_server(repo: Repository, update_checker=None, advertise_updates: bool 
     return mcp
 
 
+def _serve(repo: Repository, advertise_updates: bool) -> None:
+    """Run the stdio MCP server; exit quietly on Ctrl+C instead of dumping a
+    traceback. ``os._exit`` (not ``sys.exit``) is deliberate: FastMCP reads
+    stdin on a background thread that is still blocked on I/O when SIGINT
+    lands, and a normal interpreter shutdown waits to join it, which is what
+    produces the ``_enter_buffered_busy`` fatal error on Ctrl+C. A hard exit
+    skips that join entirely.
+    """
+    try:
+        build_server(repo, advertise_updates=advertise_updates).run()
+    except KeyboardInterrupt:
+        sys.stderr.write("\nweb-research-mcp: stopped\n")
+        os._exit(0)
+
+
 def main() -> None:
-    import sys
+    argv = sys.argv[1:]
 
     # `web-research-mcp hook --host <name>` runs the pre-edit enforcement hook
     # instead of starting the MCP server (which owns stdio for JSON-RPC).
-    if len(sys.argv) > 1 and sys.argv[1] == "hook":
+    if argv and argv[0] == "hook":
         from . import hook
 
-        raise SystemExit(hook.main(sys.argv[2:]))
+        raise SystemExit(hook.main(argv[1:]))
+
+    if argv and argv[0] in ("help", "-h", "--help"):
+        print(HELP_TEXT)
+        return
 
     cfg = load_config()
     repo = Repository(connect(cfg.db_path), default_ttl_days=cfg.default_ttl_days)
-    build_server(repo, advertise_updates=cfg.auto_update).run()
+    _serve(repo, cfg.auto_update)
 
 
 if __name__ == "__main__":

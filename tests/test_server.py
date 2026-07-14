@@ -5,8 +5,11 @@ import pytest
 from web_research_mcp.core.models import ResearchEntry
 from web_research_mcp.core.repository import Repository
 from web_research_mcp.core.store import connect
+from web_research_mcp.mcp_server import server as server_mod
 from web_research_mcp.mcp_server.server import (
+    HELP_TEXT,
     STALE_ADVICE,
+    _serve,
     _shape_check,
     _shape_get,
     build_server,
@@ -240,6 +243,51 @@ def test_save_then_check_hit_through_tools(repo):
     assert out["status_tag"] == "current"
     assert out["resolved_version"] == "19"
     assert out["stale"] is False
+
+
+# ---- CLI: help text and clean Ctrl+C shutdown ----
+
+def test_help_text_lists_every_tool():
+    for tool in (
+        "list_tree", "check_reference", "get_reference", "search_reference",
+        "save_research", "invalidate_reference", "check_for_update",
+    ):
+        assert tool in HELP_TEXT
+
+
+def test_help_text_documents_hook_and_help_subcommands():
+    assert "hook --host" in HELP_TEXT
+    assert "web-research-mcp help" in HELP_TEXT
+
+
+def test_main_help_arg_prints_usage_without_starting_server(monkeypatch, capsys):
+    monkeypatch.setattr(server_mod.sys, "argv", ["web-research-mcp", "help"])
+    monkeypatch.setattr(
+        server_mod, "load_config", lambda: (_ for _ in ()).throw(AssertionError("must not run server"))
+    )
+    server_mod.main()
+    assert HELP_TEXT.strip() in capsys.readouterr().out
+
+
+def test_main_dash_dash_help_prints_usage(monkeypatch, capsys):
+    monkeypatch.setattr(server_mod.sys, "argv", ["web-research-mcp", "--help"])
+    server_mod.main()
+    assert "Usage:" in capsys.readouterr().out
+
+
+def test_serve_exits_cleanly_on_keyboard_interrupt(monkeypatch, repo, capsys):
+    class _Boom:
+        def run(self):
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(server_mod, "build_server", lambda *a, **k: _Boom())
+    exited = {}
+    monkeypatch.setattr(server_mod.os, "_exit", lambda code: exited.setdefault("code", code))
+
+    _serve(repo, advertise_updates=False)
+
+    assert exited["code"] == 0
+    assert "stopped" in capsys.readouterr().err
 
 
 # ---- async helpers ----
