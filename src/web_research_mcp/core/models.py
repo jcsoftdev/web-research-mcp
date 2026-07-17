@@ -1,4 +1,4 @@
-"""The ``ResearchEntry`` dataclass and row mapping."""
+"""The ``ResearchEntry`` dataclass, row mapping, and save outcomes."""
 
 from __future__ import annotations
 
@@ -55,3 +55,17 @@ class ResearchEntry:
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )
+
+
+@dataclass
+class SaveResult:
+    """Outcome of a guarded ``save_research`` call.
+
+    ``blocked=True`` means a fresh entry already exists for the exact slug and
+    nothing was written; ``existing_slug`` points at it. Otherwise ``entry``
+    holds the inserted/refreshed row.
+    """
+
+    entry: ResearchEntry | None
+    blocked: bool
+    existing_slug: str | None

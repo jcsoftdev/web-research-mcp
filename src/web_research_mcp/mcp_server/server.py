@@ -65,6 +65,7 @@ MCP tools exposed once connected:
   search_reference(query, tech?)                       Full-text search when the topic is unknown.
   save_research(tech, topic, summary, content, ...)    Store host-researched docs.
   invalidate_reference(slug)                           Force a reference stale.
+  cache_stats(limit?)                                  Hit-rate, top misses, tokens saved.
   check_for_update()                                   Check for a newer server version.
 
 Stop the server with Ctrl+C; it shuts down without a stack trace.
@@ -127,6 +128,25 @@ def _shape_get(entry: ResearchEntry | None) -> dict:
     return shaped
 
 
+def _shape_resolve(res: dict) -> dict:
+    if not res.get("exists"):
+        return {"exists": False}
+    shaped = {
+        "status_tag": res["status_tag"],
+        "stale": res["stale"],
+        "exists": True,
+        "slug": res["slug"],
+        "resolved_version": res["resolved_version"],
+        "is_latest": res["is_latest"],
+        "summary": res["summary"],
+        "sources": res["sources"],
+        "content": res["content"],
+    }
+    if res["stale"]:
+        shaped["advice"] = STALE_ADVICE
+    return shaped
+
+
 def build_server(repo: Repository, update_checker=None, advertise_updates: bool = True) -> FastMCP:
     instructions = INSTRUCTIONS_BASE + (UPDATE_INSTRUCTION if advertise_updates else "")
     mcp = FastMCP("web-research-mcp", instructions=instructions)
@@ -139,18 +159,64 @@ def build_server(repo: Repository, update_checker=None, advertise_updates: bool 
 
     @mcp.tool()
     def check_reference(tech: str, topic: str, version: str | int | float | None = None) -> dict:
-        """Cheap existence/freshness check. No content. Omit version for the latest."""
+        """Cheap existence/freshness check — call BEFORE any web research.
+        resolve_reference does check+fetch in one call. Omit version for the latest.
+        """
         return _shape_check(repo.check_reference(tech, topic, version=_coerce_version(version)))
 
     @mcp.tool()
+    def check_reference_batch(items: list[dict]) -> dict:
+        """Batch existence/freshness checks in ONE call. Use when auditing several
+        techs/topics at once instead of looping check_reference.
+        """
+        results = []
+        for res in repo.check_reference_batch(items):
+            echo = {k: res[k] for k in ("tech", "topic", "version") if k in res}
+            echo.update(_shape_check(res))
+            results.append(echo)
+        return {"results": results}
+
+    @mcp.tool()
+    def resolve_reference(
+        tech: str,
+        topic: str,
+        version: str | int | float | None = None,
+        max_age_days: int | None = None,
+    ) -> dict:
+        """One-call cache lookup: existence + freshness + full content. CALL THIS
+        BEFORE ANY WEB RESEARCH on a technology topic. Returns {exists: false} on a
+        miss — only then research the web and save_research. max_age_days overrides
+        the entry TTL for this call (a JS framework moves fast, Go stdlib does not).
+        """
+        return _shape_resolve(
+            repo.resolve_reference(
+                tech, topic, version=_coerce_version(version), max_age_days=max_age_days
+            )
+        )
+
+    @mcp.tool()
     def get_reference(slug: str, section: str | None = None) -> dict:
-        """Full cached doc for a slug. Optional section returns one heading block."""
+        """Full cached doc for a slug. Prefer resolve_reference(tech, topic) over
+        check_reference+get_reference — one round-trip instead of two. Optional
+        section returns one heading block.
+        """
         return _shape_get(repo.get_reference(slug, section=section))
 
     @mcp.tool()
     def search_reference(query: str, tech: str | None = None) -> dict:
-        """Full-text search over cached references when the exact topic is unknown."""
+        """Full-text search over cached references when the exact topic is unknown.
+        Use BEFORE any web search — this server never browses the web.
+        """
         return {"results": repo.search_reference(query, tech=tech)}
+
+    @mcp.tool()
+    def stack_diff(items: list[dict]) -> dict:
+        """Audit a full stack (from go.mod/package.json) against the cache in ONE
+        call. Per item: fresh | stale | missing. stale = cached but outdated or
+        your version is not covered; missing = never researched. Research +
+        save_research only what is not fresh.
+        """
+        return {"results": repo.stack_diff(items)}
 
     @mcp.tool()
     def save_research(
@@ -163,18 +229,22 @@ def build_server(repo: Repository, update_checker=None, advertise_updates: bool 
         status_tag: str = "current",
         version_locked: bool = False,
         tags: list[str] | None = None,
+        force: bool = False,
     ) -> dict:
-        """Store host-researched docs. Supersedes older versions atomically.
+        """Store host-researched docs. ENFORCEMENT: call check_reference or
+        resolve_reference for this tech/topic BEFORE any web research; if a fresh
+        entry already exists the save is rejected unless force=True.
 
         Only tech/topic/summary/content are required. Omit version for a general
         (not version-bound) reference; status_tag defaults to "current".
+        Supersedes older versions atomically.
 
         Response includes ``possible_duplicates`` when a similar topic already
         exists for this tech — reuse or consolidate instead of forking naming.
         """
         # Detect look-alike topics against existing state before inserting.
         dups = repo.find_similar_topics(tech, topic)
-        entry = repo.save_research(
+        result = repo.save_research(
             tech=tech,
             version=_coerce_version(version),
             topic=topic,
@@ -184,11 +254,31 @@ def build_server(repo: Repository, update_checker=None, advertise_updates: bool 
             status_tag=status_tag,
             version_locked=version_locked,
             tags=tags,
+            force=force,
         )
-        result = {"slug": entry.slug, "is_latest": entry.is_latest, "saved": True}
+        if result.blocked:
+            return {
+                "saved": False,
+                "blocked": True,
+                "existing_slug": result.existing_slug,
+                "warning": (
+                    "A fresh entry already exists for this exact tech/version/topic. "
+                    "You probably skipped check_reference. Pass force=True only if "
+                    "you intentionally re-researched."
+                ),
+            }
+        entry = result.entry
+        shaped = {"slug": entry.slug, "is_latest": entry.is_latest, "saved": True}
         if dups:
-            result["possible_duplicates"] = dups
-        return result
+            shaped["possible_duplicates"] = dups
+        return shaped
+
+    @mcp.tool()
+    def cache_stats(limit: int = 10) -> dict:
+        """Cache hit-rate, top missed techs (your research queue), and an
+        estimated token savings from cache hits vs. re-researching the web.
+        """
+        return repo.cache_stats(limit=limit)
 
     @mcp.tool()
     def invalidate_reference(slug: str) -> dict:

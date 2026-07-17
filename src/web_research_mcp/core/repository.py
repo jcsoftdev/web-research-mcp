@@ -10,10 +10,11 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 
+from .canonical import aliases_for, canonical_topic
 from .embeddings import EmbeddingProvider, NullProvider
-from .models import ResearchEntry
+from .models import ResearchEntry, SaveResult
 from .similarity import find_duplicates
-from .slug import make_slug, normalize_segment
+from .slug import make_slug, normalize_segment, parse_slug
 from .staleness import is_stale
 from .versioning import is_newer
 
@@ -81,7 +82,18 @@ class Repository:
     def get_reference(self, slug: str, section: str | None = None) -> ResearchEntry | None:
         row = self._row_by_slug(slug)
         if row is None:
-            return None
+            # The slug's topic segment may be an alias spelling (e.g.
+            # "react/18/whats-new") — retry with it canonicalized.
+            try:
+                tech, version, topic = parse_slug(slug)
+            except ValueError:
+                return None
+            canonical = canonical_topic(topic)
+            if canonical == topic:
+                return None
+            row = self._row_by_slug(make_slug(tech, version, canonical))
+            if row is None:
+                return None
         entry = ResearchEntry.from_row(row)
         if section is not None:
             extracted = _extract_section(entry.content, section)
@@ -89,21 +101,36 @@ class Repository:
                 entry.content = extracted
         return entry
 
-    def check_reference(
-        self,
-        tech: str,
-        topic: str,
-        version: str | None = None,
-        now: datetime | None = None,
-    ) -> dict:
-        from .slug import normalize_segment
+    def _lookup(
+        self, tech: str, topic: str, version: str | None
+    ) -> tuple[sqlite3.Row | None, str, str]:
+        """Resolve tech/topic/version to its row plus the normalized segments.
 
+        Version given -> exact slug; omitted -> the latest row for tech/topic.
+        """
         tech_n = normalize_segment(tech)
-        topic_n = normalize_segment(topic)
+        topic_n = canonical_topic(topic)
         if version:
-            row = self._row_by_slug(make_slug(tech, version, topic))
+            row = self._row_by_slug(make_slug(tech, version, topic_n))
         else:
             row = self._latest_row(tech_n, topic_n)
+        if row is None:
+            # Rows saved before topic canonicalization existed may still carry
+            # a literal alias spelling — try each alias that maps to this
+            # canonical topic so they don't become invisible (and get
+            # silently re-saved as a "new" canonical entry) after this
+            # feature ships. Covers both "input was itself an alias" and
+            # "input is canonical but the stored row used a different alias".
+            for alias in aliases_for(topic_n):
+                if version:
+                    row = self._row_by_slug(make_slug(tech, version, alias))
+                else:
+                    row = self._latest_row(tech_n, alias)
+                if row is not None:
+                    break
+        return row, tech_n, topic_n
+
+    def _check_from_row(self, row: sqlite3.Row | None, now: datetime | None) -> dict:
         if row is None:
             return {"exists": False}
         stale = is_stale(
@@ -119,6 +146,165 @@ class Repository:
             "resolved_version": row["version"],
             "status_tag": row["status_tag"],
             "stale": stale,
+        }
+
+    def _log_usage(
+        self,
+        tech: str,
+        topic: str | None,
+        row: sqlite3.Row | None,
+        now: datetime | None,
+    ) -> None:
+        # Insert only — caller commits, so a batch can log N events in one
+        # fsync instead of N.
+        hit = row is not None
+        tokens_saved = len(row["content"]) // 4 if hit else 0
+        self.conn.execute(
+            "INSERT INTO usage_events (event, tech, topic, tokens_saved, created_at) "
+            "VALUES (?,?,?,?,?)",
+            ("hit" if hit else "miss", tech, topic, tokens_saved, _iso(now)),
+        )
+
+    def check_reference(
+        self,
+        tech: str,
+        topic: str,
+        version: str | None = None,
+        now: datetime | None = None,
+    ) -> dict:
+        row, tech_n, topic_n = self._lookup(tech, topic, version)
+        self._log_usage(tech_n, topic_n, row, now)
+        self.conn.commit()
+        return self._check_from_row(row, now)
+
+    def check_reference_batch(
+        self, items: list[dict], now: datetime | None = None
+    ) -> list[dict]:
+        """Loop check_reference over ``{tech, topic, version?}`` items in one call.
+
+        Each result echoes tech/topic (and version when given) before the check
+        fields so the caller can correlate without positional assumptions.
+        """
+        results: list[dict] = []
+        for item in items:
+            version = item.get("version")
+            version = None if version in (None, "") else str(version)
+            row, tech_n, topic_n = self._lookup(item["tech"], item["topic"], version)
+            self._log_usage(tech_n, topic_n, row, now)
+            out: dict = {"tech": item["tech"], "topic": item["topic"]}
+            if version is not None:
+                out["version"] = version
+            out.update(self._check_from_row(row, now))
+            results.append(out)
+        self.conn.commit()
+        return results
+
+    def stack_diff(self, items: list[dict], now: datetime | None = None) -> list[dict]:
+        """Audit a stack (``{tech, version?}`` items) against the cache.
+
+        Per item: ``missing`` (never researched), ``stale`` (cached but every
+        covering entry is outdated, or the requested version is not covered) or
+        ``fresh`` (at least one covering entry is current). A general
+        (version-less) entry covers any requested version.
+        """
+        results: list[dict] = []
+        for item in items:
+            tech = item["tech"]
+            requested = item.get("version")
+            requested = None if requested in (None, "") else str(requested)
+            tech_n = normalize_segment(tech)
+            req_n = normalize_segment(requested) if requested else None
+            rows = self.conn.execute(
+                "SELECT version, version_locked, updated_at, ttl_days "
+                "FROM research_entries WHERE tech = ?",
+                (tech_n,),
+            ).fetchall()
+            if not rows:
+                results.append(
+                    {
+                        "tech": tech,
+                        "requested_version": requested,
+                        "status": "missing",
+                        "cached_versions": [],
+                    }
+                )
+                continue
+            cached_versions = sorted(
+                {r["version"] for r in rows}, key=lambda v: (v is None, v or "")
+            )
+            if req_n is None:
+                covering = list(rows)
+            else:
+                covering = [
+                    r for r in rows if r["version"] == req_n or r["version"] is None
+                ]
+            if req_n is not None and not covering:
+                status = "stale"
+            else:
+                any_fresh = any(
+                    not is_stale(
+                        version_locked=bool(r["version_locked"]),
+                        updated_at=r["updated_at"],
+                        ttl_days=r["ttl_days"],
+                        now=now,
+                    )
+                    for r in covering
+                )
+                status = "fresh" if any_fresh else "stale"
+            results.append(
+                {
+                    "tech": tech,
+                    "requested_version": requested,
+                    "status": status,
+                    "cached_versions": cached_versions,
+                }
+            )
+        return results
+
+    def resolve_reference(
+        self,
+        tech: str,
+        topic: str,
+        version: str | None = None,
+        max_age_days: int | None = None,
+        now: datetime | None = None,
+    ) -> dict:
+        """check_reference + get_reference in one call.
+
+        ``max_age_days`` overrides the entry TTL for this call only, unless the
+        entry is version_locked (never stale) or negatively invalidated
+        (always stale).
+        """
+        row, tech_n, topic_n = self._lookup(tech, topic, version)
+        self._log_usage(tech_n, topic_n, row, now)
+        self.conn.commit()
+        if row is None:
+            return {"exists": False}
+        entry = ResearchEntry.from_row(row)
+        ttl = entry.ttl_days
+        if (
+            max_age_days is not None
+            and not entry.version_locked
+            and ttl is not None
+            and ttl >= 0
+        ):
+            ttl = max_age_days
+        stale = is_stale(
+            version_locked=entry.version_locked,
+            updated_at=entry.updated_at,
+            ttl_days=ttl,
+            now=now,
+        )
+        return {
+            "exists": True,
+            "slug": entry.slug,
+            "is_latest": entry.is_latest,
+            "resolved_version": entry.version,
+            "status_tag": entry.status_tag,
+            "stale": stale,
+            "summary": entry.summary,
+            "sources": entry.sources,
+            "content": entry.content,
         }
 
     def search_reference(
@@ -207,7 +393,7 @@ class Repository:
         similarity swaps in (same signature, same call site).
         """
         tech_n = normalize_segment(tech)
-        topic_n = normalize_segment(topic)
+        topic_n = canonical_topic(topic)
         rows = self.conn.execute(
             "SELECT slug, topic, version, is_latest FROM research_entries "
             "WHERE tech = ? ORDER BY is_latest DESC, version DESC",
@@ -242,23 +428,35 @@ class Repository:
         status_tag: str,
         version_locked: bool,
         tags: list[str] | None = None,
+        force: bool = False,
         now: datetime | None = None,
-    ) -> ResearchEntry:
-        slug = make_slug(tech, version, topic)
-        from .slug import normalize_segment
-
+    ) -> SaveResult:
         tech_n = normalize_segment(tech)
-        topic_n = normalize_segment(topic)
+        topic_n = canonical_topic(topic)
         version_n = normalize_segment(version) if version else None
+        slug = make_slug(tech, version, topic_n)
         ttl_days = None if version_locked else self.default_ttl_days
         ts = _iso(now)
         sources_json = json.dumps(sources or [])
         tags_json = json.dumps(tags or [])
 
+        # Redundant-save guard: re-saving over a still-fresh entry means the
+        # caller skipped check_reference. Block unless they insist (force).
+        # _lookup also falls back to a legacy alias-spelled row so a re-save
+        # under the canonical topic doesn't fork a duplicate of it.
+        existing, _, _ = self._lookup(tech, topic, version)
+        if existing is not None and not force and not is_stale(
+            version_locked=bool(existing["version_locked"]),
+            updated_at=existing["updated_at"],
+            ttl_days=existing["ttl_days"],
+            now=now,
+        ):
+            return SaveResult(entry=None, blocked=True, existing_slug=slug)
+
         conn = self.conn
         conn.execute("BEGIN IMMEDIATE")
         try:
-            existing = self._row_by_slug(slug)
+            existing, _, _ = self._lookup(tech, topic, version)
             if existing is not None:
                 # Same tech/version/topic — refresh in place, keep is_latest.
                 conn.execute(
@@ -278,7 +476,19 @@ class Repository:
                     ),
                 )
                 conn.commit()
-                return ResearchEntry.from_row(self._row_by_slug(slug))
+                return SaveResult(
+                    # Fetch by id, not by (possibly canonical) slug — a row
+                    # found via the legacy-alias fallback keeps its original
+                    # slug on refresh, it isn't migrated.
+                    entry=ResearchEntry.from_row(
+                        conn.execute(
+                            "SELECT * FROM research_entries WHERE id=?",
+                            (existing["id"],),
+                        ).fetchone()
+                    ),
+                    blocked=False,
+                    existing_slug=None,
+                )
 
             current = self._latest_row(tech_n, topic_n)
             new_is_latest = 1
@@ -322,9 +532,42 @@ class Repository:
         except Exception:
             conn.rollback()
             raise
-        return ResearchEntry.from_row(conn.execute(
-            "SELECT * FROM research_entries WHERE id=?", (new_id,)
-        ).fetchone())
+        return SaveResult(
+            entry=ResearchEntry.from_row(conn.execute(
+                "SELECT * FROM research_entries WHERE id=?", (new_id,)
+            ).fetchone()),
+            blocked=False,
+            existing_slug=None,
+        )
+
+    def cache_stats(self, limit: int = 10) -> dict:
+        """Hit-rate, top-missed techs (= the research queue), and an estimate
+        of tokens saved by cache hits — sourced from ``usage_events``.
+        """
+        counts = {
+            r["event"]: r["n"]
+            for r in self.conn.execute(
+                "SELECT event, COUNT(*) as n FROM usage_events GROUP BY event"
+            ).fetchall()
+        }
+        hits = counts.get("hit", 0)
+        misses = counts.get("miss", 0)
+        total = hits + misses
+        tokens_saved = self.conn.execute(
+            "SELECT COALESCE(SUM(tokens_saved), 0) as s FROM usage_events WHERE event='hit'"
+        ).fetchone()["s"]
+        top_misses = self.conn.execute(
+            "SELECT tech, COUNT(*) as n FROM usage_events WHERE event='miss' "
+            "GROUP BY tech ORDER BY n DESC, tech ASC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return {
+            "hits": hits,
+            "misses": misses,
+            "hit_rate": (hits / total) if total else 0.0,
+            "tokens_saved_estimate": tokens_saved,
+            "top_misses": [{"tech": r["tech"], "count": r["n"]} for r in top_misses],
+        }
 
     def invalidate_reference(self, slug: str) -> bool:
         # Negative ttl forces stale regardless of lock state (see staleness).

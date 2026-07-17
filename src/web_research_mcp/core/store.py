@@ -67,6 +67,22 @@ CREATE TRIGGER IF NOT EXISTS research_au AFTER UPDATE ON research_entries BEGIN
     INSERT INTO research_fts(rowid, topic, summary, content, tags)
     VALUES (new.id, new.topic, new.summary, new.content, new.tags);
 END;
+
+-- One row per check_reference/resolve_reference/check_reference_batch lookup.
+-- event: 'hit' (cache had it) | 'miss' (nothing cached, went to the research
+-- queue). tokens_saved is a rough chars/4 estimate of what a hit avoided
+-- re-fetching, used only for cache_stats' running total.
+CREATE TABLE IF NOT EXISTS usage_events (
+    id           INTEGER PRIMARY KEY,
+    event        TEXT NOT NULL,
+    tech         TEXT NOT NULL,
+    topic        TEXT,
+    tokens_saved INTEGER NOT NULL DEFAULT 0,
+    created_at   TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_usage_event ON usage_events(event);
+CREATE INDEX IF NOT EXISTS idx_usage_tech  ON usage_events(tech);
 """
 
 
