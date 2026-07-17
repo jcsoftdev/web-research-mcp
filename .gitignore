@@ -13,3 +13,6 @@ __pycache__/
 
 # local server DB
 .web-research-mcp/
+
+# claude code local overrides
+.claude/settings.local.json

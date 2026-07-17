@@ -98,6 +98,15 @@ def test_consulted_empty_transcript():
     assert gate.consulted_techs("", {"react"}) == set()
 
 
+def test_consulted_from_resolve_reference_call():
+    # resolve_reference is the recommended check+fetch tool — its own docstring
+    # says "call this before any web research". A transcript that only calls
+    # it must still count as consulted, or the gate contradicts its own advice.
+    tracked = {"nextjs"}
+    transcript = '{"name":"resolve_reference","input":{"tech":"nextjs","topic":"latest"}}\n'
+    assert gate.consulted_techs(transcript, tracked) == {"nextjs"}
+
+
 # ---- evaluate ----
 
 def test_evaluate_denies_when_detected_but_not_consulted():
@@ -129,3 +138,58 @@ def test_evaluate_partial_consult_denies_only_missing():
     v = gate.evaluate("x.tsx", content, transcript, repo.conn)
     assert v.allow is False
     assert v.missing == {"nextjs"}
+
+
+# ---- query_techs ----
+
+def test_query_techs_matches_word_boundary():
+    assert gate.query_techs("react hooks best practices", {"react", "nextjs"}) == {"react"}
+
+
+def test_query_techs_matches_in_url():
+    assert gate.query_techs("https://nextjs.org/docs/app", {"nextjs"}) == {"nextjs"}
+
+
+def test_query_techs_ignores_substring_false_positive():
+    assert gate.query_techs("nextauth setup guide", {"nextjs"}) == set()
+
+
+def test_query_techs_empty_text():
+    assert gate.query_techs("", {"react"}) == set()
+
+
+# ---- evaluate_search ----
+
+def test_evaluate_search_denies_redundant_search_of_fresh_tech():
+    repo = _repo_with("nextjs")
+    v = gate.evaluate_search("nextjs app router tutorial", "", repo.conn)
+    assert v.allow is False
+    assert v.missing == {"nextjs"}
+
+
+def test_evaluate_search_allows_when_already_consulted():
+    repo = _repo_with("nextjs")
+    transcript = '{"name":"check_reference","input":{"tech":"nextjs"}}'
+    v = gate.evaluate_search("nextjs app router tutorial", transcript, repo.conn)
+    assert v.allow is True
+
+
+def test_evaluate_search_allows_untracked_tech():
+    repo = _repo_with("nextjs")
+    v = gate.evaluate_search("svelte tutorial", "", repo.conn)
+    assert v.allow is True
+
+
+def test_evaluate_search_allows_stale_entry():
+    from datetime import datetime, timedelta, timezone
+
+    repo = _repo_with("nextjs")
+    future = datetime.now(timezone.utc) + timedelta(days=60)
+    v = gate.evaluate_search("nextjs app router tutorial", "", repo.conn, now=future)
+    assert v.allow is True
+
+
+def test_evaluate_search_allows_when_no_tracked_techs():
+    repo = Repository(connect(":memory:"))
+    v = gate.evaluate_search("nextjs tutorial", "", repo.conn)
+    assert v.allow is True

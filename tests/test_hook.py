@@ -122,3 +122,118 @@ def test_run_missing_transcript_file_is_treated_as_empty(tmp_path):
     })
     code, out, err = hook.run("claude", raw, repo.conn)
     assert code == 2  # can't prove consultation -> block
+
+
+# ---- WebSearch/WebFetch: pre-search redundancy gate ----
+
+def test_run_pre_websearch_denies_redundant_fresh_tech():
+    repo = _repo_with("nextjs")
+    raw = json.dumps({
+        "tool_name": "WebSearch",
+        "tool_input": {"query": "nextjs app router tutorial"},
+    })
+    code, out, err = hook.run("claude", raw, repo.conn)
+    assert code == 2
+    assert "nextjs" in err
+    assert "resolve_reference" in err
+
+
+def test_run_pre_webfetch_denies_redundant_fresh_tech_by_url():
+    repo = _repo_with("nextjs")
+    raw = json.dumps({
+        "tool_name": "WebFetch",
+        "tool_input": {"url": "https://nextjs.org/docs/app-router"},
+    })
+    code, out, err = hook.run("claude", raw, repo.conn)
+    assert code == 2
+    assert "nextjs" in err
+
+
+def test_run_pre_websearch_allows_when_consulted(tmp_path):
+    repo = _repo_with("nextjs")
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text('{"name":"check_reference","input":{"tech":"nextjs"}}\n')
+    raw = json.dumps({
+        "tool_name": "WebSearch",
+        "tool_input": {"query": "nextjs app router tutorial"},
+        "transcript_path": str(transcript),
+    })
+    code, out, err = hook.run("claude", raw, repo.conn)
+    assert code == 0
+    assert err == ""
+
+
+def test_run_pre_websearch_allows_untracked_tech():
+    repo = _repo_with("nextjs")
+    raw = json.dumps({
+        "tool_name": "WebSearch",
+        "tool_input": {"query": "svelte tutorial"},
+    })
+    code, out, err = hook.run("claude", raw, repo.conn)
+    assert code == 0
+
+
+def test_run_pre_websearch_cursor_denies_with_permission_json():
+    repo = _repo_with("nextjs")
+    raw = json.dumps({
+        "tool_name": "WebSearch",
+        "tool_input": {"query": "nextjs app router tutorial"},
+    })
+    code, out, err = hook.run("cursor", raw, repo.conn)
+    payload = json.loads(out)
+    assert payload["permission"] == "deny"
+    assert "nextjs" in payload["agentMessage"]
+
+
+# ---- WebSearch/WebFetch: post-search save reminder ----
+
+def test_run_post_websearch_injects_save_reminder_claude():
+    repo = _repo_with("nextjs")
+    raw = json.dumps({
+        "tool_name": "WebSearch",
+        "tool_input": {"query": "svelte tutorial"},
+        "tool_response": {"results": []},
+    })
+    code, out, err = hook.run("claude", raw, repo.conn)
+    assert code == 0
+    payload = json.loads(out)
+    assert payload["hookSpecificOutput"]["hookEventName"] == "PostToolUse"
+    assert "save_research" in payload["hookSpecificOutput"]["additionalContext"]
+
+
+def test_run_post_webfetch_injects_save_reminder_claude():
+    repo = _repo_with("nextjs")
+    raw = json.dumps({
+        "tool_name": "WebFetch",
+        "tool_input": {"url": "https://svelte.dev/docs"},
+        "tool_response": {"content": "..."},
+    })
+    code, out, err = hook.run("claude", raw, repo.conn)
+    assert code == 0
+    payload = json.loads(out)
+    assert "save_research" in payload["hookSpecificOutput"]["additionalContext"]
+
+
+def test_run_post_websearch_noop_on_unsupported_host():
+    repo = _repo_with("nextjs")
+    raw = json.dumps({
+        "tool_name": "WebSearch",
+        "tool_input": {"query": "svelte tutorial"},
+        "tool_response": {"results": []},
+    })
+    code, out, err = hook.run("cursor", raw, repo.conn)
+    assert code == 0
+    assert out == ""
+
+
+def test_run_post_edit_is_noop():
+    repo = _repo_with("nextjs")
+    raw = json.dumps({
+        "tool_name": "Edit",
+        "tool_input": {"file_path": "x.tsx", "new_string": "import 'next/link'"},
+        "tool_response": {"success": True},
+    })
+    code, out, err = hook.run("claude", raw, repo.conn)
+    assert code == 0
+    assert out == ""
+    assert err == ""
