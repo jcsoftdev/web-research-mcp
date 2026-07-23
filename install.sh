@@ -8,7 +8,11 @@
 #   3. Ask which env config you want (DB path / TTL / embeddings) — Enter = default.
 #   4. Ask which hosts to register into (Claude Code, Codex, Gemini,
 #      Claude Desktop, Cursor) and wire each one up.
-#   5. Verify the binary boots.
+#   5. (optional) Install the enforcement hook.
+#   6. Claude Code only: install the web-research-model-policy skill and the
+#      web-researcher subagent (~/.claude/skills, ~/.claude/agents) so
+#      cache-miss research always delegates to Haiku 4.5.
+#   7. Verify the binary boots.
 #
 # Run it from the repo:   ./install.sh
 # Or from anywhere against a checkout:   WEB_RESEARCH_SRC=/path/to/repo ./install.sh
@@ -302,6 +306,27 @@ if [ "${#SELECTED[@]}" -gt 0 ]; then
     *) info "skipped enforcement hook (register later, see README)" ;;
   esac
 fi
+
+# ---- 6b. Claude Code skill + subagent (cache-miss research → Haiku) ---------
+# Non-disruptive (no denies, just guidance + an agent definition) — installed
+# unconditionally for Claude Code, independent of the enforcement-hook opt-in.
+install_claude_extras() {  # install_claude_extras <src_dir>
+  local src="$1"
+  local skills_dst="$HOME/.claude/skills/web-research-model-policy"
+  local agents_dst="$HOME/.claude/agents"
+  mkdir -p "$skills_dst" "$agents_dst"
+  cp -f "$src/claude/skills/web-research-model-policy/SKILL.md" "$skills_dst/SKILL.md" \
+    && cp -f "$src/claude/agents/web-researcher.md" "$agents_dst/web-researcher.md"
+}
+
+for idx in ${SELECTED[@]+"${SELECTED[@]}"}; do
+  if [ "${H_LABEL[$idx]}" = "Claude Code" ]; then
+    install_claude_extras "$SRC" \
+      && ok "skill + subagent → Claude Code ${DIM}(cache-miss research delegates to Haiku)${RST}" \
+      || warn "failed to install skill/subagent → Claude Code"
+    break
+  fi
+done
 
 # ---- 7. verify ---------------------------------------------------------------
 printf '\n'
