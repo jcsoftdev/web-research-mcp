@@ -8,7 +8,11 @@
 #   3. Ask which env config you want (DB path / TTL / embeddings) — Enter = default.
 #   4. Ask which hosts to register into (Claude Code, Codex, Gemini,
 #      Claude Desktop, Cursor) and wire each one up.
-#   5. Verify the binary boots.
+#   5. (optional) Install the enforcement hook.
+#   6. Claude Code only: install the web-research-model-policy skill and the
+#      web-researcher subagent (~/.claude/skills, ~/.claude/agents) so
+#      cache-miss research always delegates to Haiku 4.5.
+#   7. Verify the binary boots.
 #
 # Run it from the repo:   ./install.sh
 # Or from anywhere against a checkout:   WEB_RESEARCH_SRC=/path/to/repo ./install.sh
@@ -228,14 +232,21 @@ import json, os, sys
 host, binp = sys.argv[1], sys.argv[2]
 cmd = f"{binp} hook --host {host}"
 HOME = os.path.expanduser("~")
-# (config path, layout, event, matcher)
+# (config path, layout, [(event, matcher), ...])
+# claude gets both the pre-edit gate and the search-redundancy gate
+# (pre + post on WebSearch/WebFetch) — its hook JSON schema is the only one
+# verified end-to-end. Other hosts keep just the edit gate until validated.
 SPECS = {
-    "claude": (f"{HOME}/.claude/settings.json", "pretool", "PreToolUse", "Edit|Write"),
-    "codex":  (f"{HOME}/.codex/hooks.json",     "pretool", "PreToolUse", "Bash"),
-    "gemini": (f"{HOME}/.gemini/settings.json", "pretool", "BeforeTool", "*"),
-    "cursor": (f"{HOME}/.cursor/hooks.json",    "cursor",  None,         None),
+    "claude": (f"{HOME}/.claude/settings.json", "pretool", [
+        ("PreToolUse", "Edit|Write"),
+        ("PreToolUse", "WebSearch|WebFetch"),
+        ("PostToolUse", "WebSearch|WebFetch"),
+    ]),
+    "codex":  (f"{HOME}/.codex/hooks.json",     "pretool", [("PreToolUse", "Bash")]),
+    "gemini": (f"{HOME}/.gemini/settings.json", "pretool", [("BeforeTool", "*")]),
+    "cursor": (f"{HOME}/.cursor/hooks.json",    "cursor",  None),
 }
-path, layout, event, matcher = SPECS[host]
+path, layout, specs = SPECS[host]
 os.makedirs(os.path.dirname(path), exist_ok=True)
 data = {}
 if os.path.exists(path):
@@ -251,10 +262,15 @@ def has_cmd(blob):
 if layout == "pretool":
     # Claude/Codex/Gemini share the matcher+hooks list shape under an events map.
     events = data.setdefault("hooks", {})
-    entries = events.setdefault(event, [])
-    if not has_cmd(entries):
-        entries.append({"matcher": matcher,
-                        "hooks": [{"type": "command", "command": cmd}]})
+    for event, matcher in specs:
+        entries = events.setdefault(event, [])
+        exists = any(
+            e.get("matcher") == matcher and has_cmd(e.get("hooks", []))
+            for e in entries
+        )
+        if not exists:
+            entries.append({"matcher": matcher,
+                            "hooks": [{"type": "command", "command": cmd}]})
 elif layout == "cursor":
     # Cursor cannot block a raw file write pre-hoc; guard the surfaces it can:
     # shell and MCP tool execution.
@@ -290,6 +306,27 @@ if [ "${#SELECTED[@]}" -gt 0 ]; then
     *) info "skipped enforcement hook (register later, see README)" ;;
   esac
 fi
+
+# ---- 6b. Claude Code skill + subagent (cache-miss research → Haiku) ---------
+# Non-disruptive (no denies, just guidance + an agent definition) — installed
+# unconditionally for Claude Code, independent of the enforcement-hook opt-in.
+install_claude_extras() {  # install_claude_extras <src_dir>
+  local src="$1"
+  local skills_dst="$HOME/.claude/skills/web-research-model-policy"
+  local agents_dst="$HOME/.claude/agents"
+  mkdir -p "$skills_dst" "$agents_dst"
+  cp -f "$src/claude/skills/web-research-model-policy/SKILL.md" "$skills_dst/SKILL.md" \
+    && cp -f "$src/claude/agents/web-researcher.md" "$agents_dst/web-researcher.md"
+}
+
+for idx in ${SELECTED[@]+"${SELECTED[@]}"}; do
+  if [ "${H_LABEL[$idx]}" = "Claude Code" ]; then
+    install_claude_extras "$SRC" \
+      && ok "skill + subagent → Claude Code ${DIM}(cache-miss research delegates to Haiku)${RST}" \
+      || warn "failed to install skill/subagent → Claude Code"
+    break
+  fi
+done
 
 # ---- 7. verify ---------------------------------------------------------------
 printf '\n'

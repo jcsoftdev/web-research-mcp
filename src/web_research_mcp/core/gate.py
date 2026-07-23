@@ -18,8 +18,10 @@ from __future__ import annotations
 import re
 import sqlite3
 from dataclasses import dataclass
+from datetime import datetime
 
 from .slug import normalize_segment
+from .staleness import is_stale
 
 # Map a tracked tech (normalized slug segment) to the identifiers it appears as
 # in source code. The tech's own name is always included implicitly, so only
@@ -38,6 +40,7 @@ _CODE_EXTENSIONS = {
 # Reference tools that count as "consulting the cache".
 _REFERENCE_TOOLS = (
     "check_reference",
+    "resolve_reference",
     "get_reference",
     "search_reference",
     "list_tree",
@@ -141,4 +144,64 @@ def evaluate(
 
     consulted = consulted_techs(transcript_text, tracked)
     missing = detected - consulted
+    return GateVerdict(allow=not missing, missing=frozenset(missing))
+
+
+def query_techs(text: str, tracked: set[str]) -> set[str]:
+    """Tracked techs named as a whole word in free text (a WebSearch query or
+    WebFetch URL) — same word-boundary matching as :func:`detect_techs`, but
+    without the code-file gate since search text is never source code.
+    """
+    if not text:
+        return set()
+    hits: set[str] = set()
+    for tech in tracked:
+        for alias in _aliases_for(tech):
+            if re.search(rf"\b{re.escape(alias)}\b", text, re.IGNORECASE):
+                hits.add(tech)
+                break
+    return hits
+
+
+def _has_fresh_entry(tech: str, conn: sqlite3.Connection, now: datetime | None) -> bool:
+    rows = conn.execute(
+        "SELECT version_locked, updated_at, ttl_days FROM research_entries WHERE tech = ?",
+        (tech,),
+    ).fetchall()
+    return any(
+        not is_stale(
+            version_locked=bool(r[0]), updated_at=r[1], ttl_days=r[2], now=now
+        )
+        for r in rows
+    )
+
+
+def evaluate_search(
+    text: str,
+    transcript_text: str,
+    conn: sqlite3.Connection,
+    now: datetime | None = None,
+) -> GateVerdict:
+    """Decide whether to allow a WebSearch/WebFetch call.
+
+    Fires only when the query/URL names a tracked tech that already has a
+    FRESH cached entry and that tech wasn't already consulted this session —
+    a redundant search that would waste tokens re-researching what's already
+    cached. A brand-new tech, or one whose cache is stale, is always allowed
+    (that's legitimate research).
+    """
+    tracked = tracked_techs(conn)
+    if not tracked:
+        return GateVerdict(allow=True, missing=frozenset())
+
+    named = query_techs(text, tracked)
+    if not named:
+        return GateVerdict(allow=True, missing=frozenset())
+
+    fresh = {t for t in named if _has_fresh_entry(t, conn, now)}
+    if not fresh:
+        return GateVerdict(allow=True, missing=frozenset())
+
+    consulted = consulted_techs(transcript_text, tracked)
+    missing = fresh - consulted
     return GateVerdict(allow=not missing, missing=frozenset(missing))

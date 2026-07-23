@@ -102,8 +102,18 @@ def _reason(missing: frozenset[str]) -> str:
     )
 
 
-def _emit_deny(host: str, missing: frozenset[str]) -> tuple[int, str, str]:
-    reason = _reason(missing)
+def _reason_search(missing: frozenset[str]) -> str:
+    techs = ", ".join(sorted(missing))
+    return (
+        f"web-research: fresh cached reference(s) already exist for [{techs}]. "
+        f"Call resolve_reference(tech, topic) instead of searching the web again."
+    )
+
+
+def _emit_deny(
+    host: str, missing: frozenset[str], reason_fn=_reason
+) -> tuple[int, str, str]:
+    reason = reason_fn(missing)
     if host == "claude":
         return 2, "", reason
     if host == "cursor":
@@ -116,6 +126,37 @@ def _emit_deny(host: str, missing: frozenset[str]) -> tuple[int, str, str]:
     return 0, json.dumps({"decision": "block", "reason": reason}), ""
 
 
+_SEARCH_TOOLS = ("WebSearch", "WebFetch")
+
+POST_SEARCH_ADVICE = (
+    "web-research: if this search surfaced reusable technical knowledge, call "
+    "save_research(tech, topic, summary, content, ...) now to cache it before "
+    "continuing."
+)
+
+
+def _search_text(tool_name: str, tool_input: dict) -> str:
+    if tool_name == "WebSearch":
+        return _first(tool_input, "query")
+    if tool_name == "WebFetch":
+        return _first(tool_input, "url")
+    return ""
+
+
+def _emit_post_context(host: str, reason: str) -> tuple[int, str, str]:
+    # Only Claude Code's PostToolUse schema is verified to carry
+    # additionalContext back to the model; other hosts stay silent rather
+    # than risk an unsupported/ignored payload.
+    if host != "claude":
+        return 0, "", ""
+    return 0, json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "PostToolUse",
+            "additionalContext": reason,
+        }
+    }), ""
+
+
 def run(host: str, raw_stdin: str, conn: sqlite3.Connection) -> tuple[int, str, str]:
     """Return ``(exit_code, stdout, stderr)`` for the given host event."""
     try:
@@ -124,6 +165,26 @@ def run(host: str, raw_stdin: str, conn: sqlite3.Connection) -> tuple[int, str, 
         return 0, "", ""  # unparseable event: never block on our own bug
     if not isinstance(data, dict):
         return 0, "", ""
+
+    tool_name = _tool_name(data)
+    is_post = "tool_response" in data
+
+    if tool_name in _SEARCH_TOOLS:
+        text = _search_text(tool_name, _tool_input(data))
+        if not text:
+            return 0, "", ""
+        if is_post:
+            return _emit_post_context(host, POST_SEARCH_ADVICE)
+        transcript = _read_transcript(
+            _first(data, "transcript_path", "transcriptPath", "transcript")
+        )
+        verdict = gate.evaluate_search(text, transcript, conn)
+        if verdict.allow:
+            return 0, "", ""
+        return _emit_deny(host, verdict.missing, reason_fn=_reason_search)
+
+    if is_post:
+        return 0, "", ""  # no post-edit action defined yet
 
     inp = normalize_input(host, data)
     if not inp.text and not inp.file_path:

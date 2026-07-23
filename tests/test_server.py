@@ -5,8 +5,11 @@ import pytest
 from web_research_mcp.core.models import ResearchEntry
 from web_research_mcp.core.repository import Repository
 from web_research_mcp.core.store import connect
+from web_research_mcp.mcp_server import server as server_mod
 from web_research_mcp.mcp_server.server import (
+    HELP_TEXT,
     STALE_ADVICE,
+    _serve,
     _shape_check,
     _shape_get,
     build_server,
@@ -101,11 +104,15 @@ def test_server_exposes_all_tools(repo):
     assert names == {
         "list_tree",
         "check_reference",
+        "check_reference_batch",
+        "resolve_reference",
         "get_reference",
         "search_reference",
+        "stack_diff",
         "save_research",
         "invalidate_reference",
         "check_for_update",
+        "cache_stats",
     }
 
 
@@ -240,6 +247,146 @@ def test_save_then_check_hit_through_tools(repo):
     assert out["status_tag"] == "current"
     assert out["resolved_version"] == "19"
     assert out["stale"] is False
+
+
+def test_tool_descriptions_embed_cache_enforcement(repo):
+    server = build_server(repo)
+    tools = {t.name: t for t in _run(server.list_tools())}
+    assert "BEFORE any web research" in tools["save_research"].description
+    assert "force=True" in tools["save_research"].description
+    assert "BEFORE any web research" in tools["check_reference"].description
+    assert "resolve_reference" in tools["get_reference"].description
+    assert "BEFORE any web search" in tools["search_reference"].description
+
+
+def test_resolve_reference_miss_through_tool_is_flat(repo):
+    server = build_server(repo)
+    out = _call(server, "resolve_reference", {"tech": "svelte", "topic": "runes"})
+    assert out == {"exists": False}
+
+
+def test_resolve_reference_hit_status_first_with_content(repo):
+    server = build_server(repo)
+    _call(server, "save_research", {
+        "tech": "react", "version": "19", "topic": "rsc",
+        "summary": "s", "content": "# Doc\nbody",
+    })
+    out = _call(server, "resolve_reference", {"tech": "react", "topic": "rsc"})
+    assert list(out)[:2] == ["status_tag", "stale"]
+    assert out["stale"] is False
+    assert "advice" not in out
+    assert out["content"] == "# Doc\nbody"
+    assert out["resolved_version"] == "19"
+
+
+def test_check_reference_batch_through_tool(repo):
+    server = build_server(repo)
+    _call(server, "save_research", {
+        "tech": "react", "topic": "hooks", "summary": "s", "content": "c",
+    })
+    out = _call(server, "check_reference_batch", {
+        "items": [
+            {"tech": "react", "topic": "hooks"},
+            {"tech": "vue", "topic": "refs"},
+        ]
+    })
+    assert len(out["results"]) == 2
+    hit, miss = out["results"]
+    assert hit["tech"] == "react"
+    assert hit["topic"] == "hooks"
+    assert hit["exists"] is True
+    assert hit["stale"] is False
+    assert miss == {"tech": "vue", "topic": "refs", "exists": False}
+
+
+def test_stack_diff_through_tool(repo):
+    server = build_server(repo)
+    _call(server, "save_research", {
+        "tech": "go", "version": "1.23", "topic": "slices",
+        "summary": "s", "content": "c",
+    })
+    out = _call(server, "stack_diff", {
+        "items": [
+            {"tech": "go", "version": "1.23"},
+            {"tech": "rust", "version": "1.80"},
+        ]
+    })
+    statuses = {r["tech"]: r["status"] for r in out["results"]}
+    assert statuses == {"go": "fresh", "rust": "missing"}
+
+
+def test_cache_stats_through_tool(repo):
+    server = build_server(repo)
+    _call(server, "save_research", {
+        "tech": "react", "topic": "hooks", "summary": "s", "content": "c" * 40,
+    })
+    _call(server, "check_reference", {"tech": "react", "topic": "hooks"})
+    _call(server, "check_reference", {"tech": "vue", "topic": "refs"})
+    out = _call(server, "cache_stats", {})
+    assert out["hits"] == 1
+    assert out["misses"] == 1
+    assert out["hit_rate"] == pytest.approx(0.5)
+    assert out["tokens_saved_estimate"] == 10  # 40 chars / 4
+    assert out["top_misses"] == [{"tech": "vue", "count": 1}]
+
+
+def test_save_research_blocked_when_fresh_entry_exists(repo):
+    server = build_server(repo)
+    args = {"tech": "react", "topic": "hooks", "summary": "s", "content": "c"}
+    _call(server, "save_research", args)
+    out = _call(server, "save_research", args)
+    assert out["saved"] is False
+    assert out["blocked"] is True
+    assert out["existing_slug"] == "react/hooks"
+    assert "force=True" in out["warning"]
+    # intentional re-research can force the save through
+    forced = _call(server, "save_research", {**args, "force": True})
+    assert forced["saved"] is True
+
+
+# ---- CLI: help text and clean Ctrl+C shutdown ----
+
+def test_help_text_lists_every_tool():
+    for tool in (
+        "list_tree", "check_reference", "get_reference", "search_reference",
+        "save_research", "invalidate_reference", "check_for_update",
+    ):
+        assert tool in HELP_TEXT
+
+
+def test_help_text_documents_hook_and_help_subcommands():
+    assert "hook --host" in HELP_TEXT
+    assert "web-research-mcp help" in HELP_TEXT
+
+
+def test_main_help_arg_prints_usage_without_starting_server(monkeypatch, capsys):
+    monkeypatch.setattr(server_mod.sys, "argv", ["web-research-mcp", "help"])
+    monkeypatch.setattr(
+        server_mod, "load_config", lambda: (_ for _ in ()).throw(AssertionError("must not run server"))
+    )
+    server_mod.main()
+    assert HELP_TEXT.strip() in capsys.readouterr().out
+
+
+def test_main_dash_dash_help_prints_usage(monkeypatch, capsys):
+    monkeypatch.setattr(server_mod.sys, "argv", ["web-research-mcp", "--help"])
+    server_mod.main()
+    assert "Usage:" in capsys.readouterr().out
+
+
+def test_serve_exits_cleanly_on_keyboard_interrupt(monkeypatch, repo, capsys):
+    class _Boom:
+        def run(self):
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(server_mod, "build_server", lambda *a, **k: _Boom())
+    exited = {}
+    monkeypatch.setattr(server_mod.os, "_exit", lambda code: exited.setdefault("code", code))
+
+    _serve(repo, advertise_updates=False)
+
+    assert exited["code"] == 0
+    assert "stopped" in capsys.readouterr().err
 
 
 # ---- async helpers ----
