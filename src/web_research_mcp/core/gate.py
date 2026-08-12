@@ -163,6 +163,58 @@ def query_techs(text: str, tracked: set[str]) -> set[str]:
     return hits
 
 
+# The other end of the cycle. `evaluate_search` guards the way in — don't
+# re-research what is already cached. This guards the way out: don't keep
+# searching without having saved what the previous searches turned up.
+#
+# It exists because the PostToolUse reminder demonstrably does not work. A
+# reminder competes with whatever the model is actually trying to do and loses;
+# a deny is obeyed. Measured in a real session: four consecutive searches, four
+# reminders, zero `save_research` calls.
+_SAVE_TOOL = "save_research"
+
+
+def unsaved_search_debt(transcript_text: str) -> int:
+    """How many web searches happened since the last `save_research`.
+
+    Counted off tool-use names in the transcript rather than parsed as JSONL:
+    the transcript is append-only and its per-host shape varies, while the
+    ordering of these two names within it does not.
+    """
+    if not transcript_text:
+        return 0
+
+    last_save = transcript_text.rfind(f'"{_SAVE_TOOL}"')
+    tail = transcript_text[last_save + 1 :] if last_save != -1 else transcript_text
+
+    return sum(
+        len(re.findall(rf'"name"\s*:\s*"{tool}"', tail)) for tool in _SEARCH_TOOL_NAMES
+    )
+
+
+_SEARCH_TOOL_NAMES = ("WebSearch", "WebFetch")
+
+
+def evaluate_debt(transcript_text: str, threshold: int) -> GateVerdict:
+    """Deny a further search while earlier ones remain uncached.
+
+    `threshold` is the number of unsaved searches tolerated before denying, so
+    a one-off lookup is never interrupted — only a chain of them. Zero disables
+    the gate entirely.
+
+    Deliberately blunt: it counts searches without judging whether each one was
+    worth caching, because that judgement cannot be made from a query string.
+    The cost of a false deny is one `save_research` call the model would have
+    skipped; the cost of missing is a cache that never fills.
+    """
+    if threshold <= 0:
+        return GateVerdict(allow=True, missing=frozenset())
+    debt = unsaved_search_debt(transcript_text)
+    if debt < threshold:
+        return GateVerdict(allow=True, missing=frozenset())
+    return GateVerdict(allow=False, missing=frozenset({str(debt)}))
+
+
 def _has_fresh_entry(tech: str, conn: sqlite3.Connection, now: datetime | None) -> bool:
     rows = conn.execute(
         "SELECT version_locked, updated_at, ttl_days FROM research_entries WHERE tech = ?",

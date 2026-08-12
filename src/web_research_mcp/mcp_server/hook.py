@@ -17,6 +17,7 @@ whatever shape arrives, falling back to a deep scan.
 
 from __future__ import annotations
 
+import os
 import json
 import sqlite3
 import sys
@@ -110,6 +111,15 @@ def _reason_search(missing: frozenset[str]) -> str:
     )
 
 
+def _reason_debt(missing: frozenset[str]) -> str:
+    count = next(iter(missing), "several")
+    return (
+        f"web-research: {count} earlier web searches this session were never "
+        f"cached. Call save_research(tech, topic, summary, content) for what "
+        f"they turned up, then search again."
+    )
+
+
 def _emit_deny(
     host: str, missing: frozenset[str], reason_fn=_reason
 ) -> tuple[int, str, str]:
@@ -127,6 +137,17 @@ def _emit_deny(
 
 
 _SEARCH_TOOLS = ("WebSearch", "WebFetch")
+
+# Off unless asked for, like the rest of the deny machinery: a gate that
+# interrupts work is opt-in. 3 is a chain, not a lookup.
+_DEBT_ENV = "WEB_RESEARCH_SEARCH_DEBT"
+
+
+def _debt_threshold() -> int:
+    try:
+        return int(os.environ.get(_DEBT_ENV, "0"))
+    except ValueError:
+        return 0  # a typo in the env must not wedge searching
 
 POST_SEARCH_ADVICE = (
     "web-research: if this search surfaced reusable technical knowledge, call "
@@ -179,9 +200,16 @@ def run(host: str, raw_stdin: str, conn: sqlite3.Connection) -> tuple[int, str, 
             _first(data, "transcript_path", "transcriptPath", "transcript")
         )
         verdict = gate.evaluate_search(text, transcript, conn)
-        if verdict.allow:
-            return 0, "", ""
-        return _emit_deny(host, verdict.missing, reason_fn=_reason_search)
+        if not verdict.allow:
+            return _emit_deny(host, verdict.missing, reason_fn=_reason_search)
+
+        # Redundancy is about this search; debt is about the ones before it.
+        # Checked second so "you already have this cached" wins when both fire:
+        # it names the specific tech and is the more actionable of the two.
+        debt = gate.evaluate_debt(transcript, _debt_threshold())
+        if not debt.allow:
+            return _emit_deny(host, debt.missing, reason_fn=_reason_debt)
+        return 0, "", ""
 
     if is_post:
         return 0, "", ""  # no post-edit action defined yet

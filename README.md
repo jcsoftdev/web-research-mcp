@@ -108,11 +108,26 @@ you do. Detects tracked techs via strong signals only (real JS/TS imports or
 `package.json` dependency keys — never prose) and checks the session
 transcript for a prior `check_reference` / `get_reference` call.
 
+**Save-debt gate** (Claude Code only) — the way out. A `PostToolUse` reminder
+loses to whatever the model is currently chasing: measured in a real session,
+six consecutive searches produced six reminders and zero `save_research` calls.
+A deny does not lose. Set `WEB_RESEARCH_SEARCH_DEBT=N` and the Nth search with
+no intervening `save_research` is refused until the earlier ones are cached.
+
+Off by default (`0`). `3` tolerates a one-off lookup and stops a chain. It
+counts searches without judging whether each deserved caching — that cannot be
+told from a query string — so the cost of a false deny is one `save_research`
+the model would have skipped, against a cache that otherwise never fills.
+
+```bash
+WEB_RESEARCH_SEARCH_DEBT=3 web-research-mcp hook --host claude
+```
+
 **Search-redundancy gate** (Claude Code only) — symmetric, for the other
 direction: `WebSearch` / `WebFetch` is **denied** when the query/URL names a
 tech that already has a *fresh* cached entry and it wasn't consulted this
 session (call `resolve_reference` instead of re-researching). A `PostToolUse`
-hook on the same tools injects a reminder to call `save_research` right after
+hook on the same tools injects a (best-effort) reminder to call `save_research` right after
 a search completes — this fires for the main thread, `Task`-spawned
 subagents, and Workflow `agent()` calls alike (all three verified empirically
 to receive Claude Code hooks).
