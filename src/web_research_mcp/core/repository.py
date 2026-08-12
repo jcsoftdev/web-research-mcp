@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from .canonical import aliases_for, canonical_topic
 from .embeddings import EmbeddingProvider, NullProvider
 from .models import ResearchEntry, SaveResult
-from .similarity import find_duplicates
+from .similarity import find_duplicates, topic_similarity
 from .slug import make_slug, normalize_segment, parse_slug
 from .staleness import is_stale
 from .versioning import is_newer
@@ -53,6 +53,13 @@ def _extract_section(content: str, section: str) -> str | None:
     if not capturing:
         return None
     return "\n".join(out)
+
+
+# Sugerir una tech distinta a la pedida solo compensa cuando es casi la misma
+# palabra (`open-router` por `openrouter`). Por debajo de eso la "sugerencia"
+# es ruido, y una sugerencia falsa cuesta más que ninguna: manda a leer una
+# referencia que no responde la pregunta.
+_NEARBY_TECH_THRESHOLD = 0.8
 
 
 class Repository:
@@ -340,6 +347,54 @@ class Repository:
             }
             for r in rows
         ]
+
+    def nearby(self, tech: str, topic: str, limit: int = 5) -> list[dict]:
+        """Cached entries close to a miss, so `exists: false` is actionable.
+
+        A bare miss cannot tell "never researched" from "wrong slug", and a
+        caller who cannot tell stops calling — which is how a cache quietly
+        falls out of use.
+
+        Same tech first: its other topics are almost always what the caller
+        meant. Only when the tech itself is unknown does it look for a
+        near-miss on the tech name, which catches `open-router` for
+        `openrouter`.
+        """
+        tech_n = normalize_segment(tech)
+        topic_n = canonical_topic(topic)
+
+        rows = self.conn.execute(
+            "SELECT tech, topic, slug FROM research_entries "
+            "WHERE tech = ? AND is_latest = 1",
+            (tech_n,),
+        ).fetchall()
+        if rows:
+            candidatos = [dict(r) for r in rows]
+            for c in candidatos:
+                c["similarity"] = round(topic_similarity(topic_n, c["topic"]), 3)
+            candidatos.sort(key=lambda c: c["similarity"], reverse=True)
+            return candidatos[:limit]
+
+        # Tech desconocida: ¿se parece a alguna que sí tengamos?
+        conocidas = {
+            r[0]
+            for r in self.conn.execute(
+                "SELECT DISTINCT tech FROM research_entries"
+            ).fetchall()
+        }
+        parecidas = [
+            t for t in conocidas if topic_similarity(tech_n, t) >= _NEARBY_TECH_THRESHOLD
+        ]
+        if not parecidas:
+            return []
+
+        marcadores = ",".join("?" for _ in parecidas)
+        rows = self.conn.execute(
+            f"SELECT tech, topic, slug FROM research_entries "
+            f"WHERE tech IN ({marcadores}) AND is_latest = 1",
+            tuple(sorted(parecidas)),
+        ).fetchall()
+        return [dict(r) for r in rows][:limit]
 
     def list_tree(self, tech: str | None = None, now: datetime | None = None) -> list[dict]:
         sql = (

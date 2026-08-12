@@ -400,3 +400,41 @@ def _run(coro):
 def _call(server, name, args):
     content = _run(server.call_tool(name, args))
     return json.loads(content[0].text)
+
+
+# ---- un fallo que se puede accionar ----
+
+def _guardar(repo, tech, topic):
+    repo.save_research(
+        tech=tech, version=None, topic=topic, summary="s", content="c",
+        sources=[], status_tag="current", version_locked=False,
+    )
+
+
+def test_check_reference_en_fallo_dice_que_si_hay_de_esa_tech(repo):
+    _guardar(repo, "openrouter", "free-models")
+    server = build_server(repo)
+
+    res = _call(server, "check_reference", {"tech": "openrouter", "topic": "modelos-gratis"})
+
+    assert res["exists"] is False
+    assert [c["topic"] for c in res["nearby"]] == ["free-models"]
+    assert res["nearby"][0]["slug"]
+
+
+def test_check_reference_en_fallo_con_cache_vacia_no_trae_nearby(repo):
+    server = build_server(repo)
+
+    res = _call(server, "check_reference", {"tech": "nada", "topic": "nada"})
+
+    assert res == {"exists": False}
+
+
+def test_resolve_reference_en_fallo_tambien_sugiere(repo):
+    _guardar(repo, "groq", "rate-limits")
+    server = build_server(repo)
+
+    res = _call(server, "resolve_reference", {"tech": "groq", "topic": "limites"})
+
+    assert res["exists"] is False
+    assert [c["topic"] for c in res["nearby"]] == ["rate-limits"]

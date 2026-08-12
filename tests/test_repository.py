@@ -565,3 +565,55 @@ def test_cache_stats_tokens_saved_estimate(repo):
     repo.check_reference("react", "server-components", version="18", now=NOW)
     stats = repo.cache_stats()
     assert stats["tokens_saved_estimate"] == 100
+
+
+# ---- nearby: qué ofrecer cuando no hay acierto ----
+#
+# Un `exists: false` a secas no distingue «no está cacheado» de «te
+# equivocaste de slug». Quien llama no puede saber cuál de las dos es, así que
+# ante la duda deja de llamar — y la caché deja de usarse.
+
+def _repo_con(*pares):
+    repo = Repository(connect(":memory:"), default_ttl_days=30)
+    for tech, topic in pares:
+        repo.save_research(
+            tech=tech, version=None, topic=topic, summary="s", content="c",
+            sources=[], status_tag="current", version_locked=False,
+        )
+    return repo
+
+
+def test_nearby_ofrece_los_topics_de_esa_tech():
+    repo = _repo_con(("openrouter", "free-models"), ("openrouter", "rate-limits"))
+
+    cerca = repo.nearby("openrouter", "modelos-gratis")
+
+    assert [c["topic"] for c in cerca] == ["free-models", "rate-limits"] or \
+           sorted(c["topic"] for c in cerca) == ["free-models", "rate-limits"]
+    assert all(c["tech"] == "openrouter" for c in cerca)
+
+
+def test_nearby_pone_primero_el_topic_mas_parecido():
+    repo = _repo_con(("groq", "rate-limits"), ("groq", "algo-sin-relacion"))
+
+    cerca = repo.nearby("groq", "rate-limit")
+
+    assert cerca[0]["topic"] == "rate-limits"
+
+
+def test_nearby_sugiere_otra_tech_cuando_la_pedida_no_existe():
+    repo = _repo_con(("openrouter", "free-models"))
+
+    cerca = repo.nearby("open-router", "free-models")
+
+    assert cerca and cerca[0]["tech"] == "openrouter"
+
+
+def test_nearby_vacio_con_la_cache_vacia():
+    repo = Repository(connect(":memory:"))
+    assert repo.nearby("lo-que-sea", "nada") == []
+
+
+def test_nearby_no_inventa_parecidos_lejanos():
+    repo = _repo_con(("openrouter", "free-models"))
+    assert repo.nearby("postgres", "vacuum") == []

@@ -17,6 +17,7 @@ whatever shape arrives, falling back to a deep scan.
 
 from __future__ import annotations
 
+import os
 import json
 import sqlite3
 import sys
@@ -110,6 +111,15 @@ def _reason_search(missing: frozenset[str]) -> str:
     )
 
 
+def _reason_debt(missing: frozenset[str]) -> str:
+    count = next(iter(missing), "several")
+    return (
+        f"web-research: {count} earlier web searches this session were never "
+        f"cached. Call save_research(tech, topic, summary, content) for what "
+        f"they turned up, then search again."
+    )
+
+
 def _emit_deny(
     host: str, missing: frozenset[str], reason_fn=_reason
 ) -> tuple[int, str, str]:
@@ -128,11 +138,71 @@ def _emit_deny(
 
 _SEARCH_TOOLS = ("WebSearch", "WebFetch")
 
+# Off unless asked for, like the rest of the deny machinery: a gate that
+# interrupts work is opt-in. 3 is a chain, not a lookup.
+_DEBT_ENV = "WEB_RESEARCH_SEARCH_DEBT"
+
+
+def _debt_threshold() -> int:
+    try:
+        return int(os.environ.get(_DEBT_ENV, "0"))
+    except ValueError:
+        return 0  # a typo in the env must not wedge searching
+
 POST_SEARCH_ADVICE = (
     "web-research: if this search surfaced reusable technical knowledge, call "
     "save_research(tech, topic, summary, content, ...) now to cache it before "
     "continuing."
 )
+
+# Labels that name the site's role, not its technology. Stripping them turns
+# docs.python.org into "python" instead of "docs" — and "docs" as a tech would
+# collide across every project that ever gets cached.
+_ROLE_LABELS = {
+    "www", "docs", "doc", "api", "developer", "developers", "blog", "learn",
+    "help", "support", "en", "guide", "guides", "reference", "wiki",
+}
+
+
+# Second-level registry labels (example.co.uk). Never a technology name.
+_REGISTRY_LABELS = {"co", "com", "org", "net", "ac", "gov", "edu"}
+
+
+def _tech_from_url(url: str) -> str:
+    """The technology a URL is about, guessed from its host.
+
+    A guess, deliberately: a wrong `tech=` costs one correction by the caller,
+    while no suggestion at all costs the save entirely — which is the failure
+    actually observed.
+    """
+    host = url.split("//", 1)[-1].split("/", 1)[0].split("@")[-1].split(":")[0]
+    labels = [label for label in host.lower().split(".") if label]
+    if len(labels) < 2:
+        return ""
+    meaningful = [
+        label
+        for label in labels[:-1]  # the TLD itself is never the technology
+        if label not in _ROLE_LABELS and label not in _REGISTRY_LABELS
+    ]
+    # Last, not first: on pkg.go.dev the technology is `go`, and on
+    # docs.python.org the role label is already gone by here.
+    return meaningful[-1] if meaningful else ""
+
+
+def _post_search_advice(tool_name: str, text: str) -> str:
+    """The generic reminder, plus whatever of the call we can already fill in."""
+    tech = _tech_from_url(text) if tool_name == "WebFetch" else ""
+    if tech:
+        return (
+            f"web-research: cache what this page taught you — "
+            f'save_research(tech="{tech}", topic=..., summary=..., content=...) '
+            f"— before continuing. Skip only if it held nothing reusable."
+        )
+    return (
+        f'web-research: the search "{text}" is not cached. If it surfaced '
+        f"reusable technical knowledge, call save_research(tech, topic, "
+        f"summary, content) now, before continuing."
+    )
 
 
 def _search_text(tool_name: str, tool_input: dict) -> str:
@@ -174,14 +244,21 @@ def run(host: str, raw_stdin: str, conn: sqlite3.Connection) -> tuple[int, str, 
         if not text:
             return 0, "", ""
         if is_post:
-            return _emit_post_context(host, POST_SEARCH_ADVICE)
+            return _emit_post_context(host, _post_search_advice(tool_name, text))
         transcript = _read_transcript(
             _first(data, "transcript_path", "transcriptPath", "transcript")
         )
         verdict = gate.evaluate_search(text, transcript, conn)
-        if verdict.allow:
-            return 0, "", ""
-        return _emit_deny(host, verdict.missing, reason_fn=_reason_search)
+        if not verdict.allow:
+            return _emit_deny(host, verdict.missing, reason_fn=_reason_search)
+
+        # Redundancy is about this search; debt is about the ones before it.
+        # Checked second so "you already have this cached" wins when both fire:
+        # it names the specific tech and is the more actionable of the two.
+        debt = gate.evaluate_debt(transcript, _debt_threshold())
+        if not debt.allow:
+            return _emit_deny(host, debt.missing, reason_fn=_reason_debt)
+        return 0, "", ""
 
     if is_post:
         return 0, "", ""  # no post-edit action defined yet

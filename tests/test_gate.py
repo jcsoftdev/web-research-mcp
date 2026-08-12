@@ -193,3 +193,77 @@ def test_evaluate_search_allows_when_no_tracked_techs():
     repo = Repository(connect(":memory:"))
     v = gate.evaluate_search("nextjs tutorial", "", repo.conn)
     assert v.allow is True
+
+
+# ---- unsaved_search_debt ----
+#
+# El otro extremo del ciclo. El gate de redundancia protege la ENTRADA (no
+# vuelvas a buscar lo que ya está cacheado); esto protege la SALIDA (no sigas
+# buscando sin haber guardado lo anterior). Medido en la práctica: un recordatorio
+# en PostToolUse se ignora cuando el modelo persigue otro objetivo, mientras que
+# una denegación se obedece siempre.
+
+def _busqueda(query="groq free tier limits"):
+    return (
+        '{"type":"assistant","message":{"content":[{"type":"tool_use",'
+        f'"name":"WebSearch","input":{{"query":"{query}"}}}}]}}}}\n'
+    )
+
+
+def _guardado():
+    return (
+        '{"type":"assistant","message":{"content":[{"type":"tool_use",'
+        '"name":"save_research","input":{"tech":"groq"}}]}}\n'
+    )
+
+
+def test_debt_zero_without_searches():
+    assert gate.unsaved_search_debt("") == 0
+    assert gate.unsaved_search_debt('{"type":"user"}\n') == 0
+
+
+def test_debt_counts_searches_since_last_save():
+    transcript = _busqueda() + _busqueda() + _busqueda()
+    assert gate.unsaved_search_debt(transcript) == 3
+
+
+def test_saving_clears_the_debt():
+    transcript = _busqueda() + _busqueda() + _guardado()
+    assert gate.unsaved_search_debt(transcript) == 0
+
+
+def test_only_searches_after_the_last_save_count():
+    transcript = _busqueda() + _guardado() + _busqueda() + _busqueda()
+    assert gate.unsaved_search_debt(transcript) == 2
+
+
+def test_webfetch_counts_as_a_search():
+    transcript = (
+        '{"type":"assistant","message":{"content":[{"type":"tool_use",'
+        '"name":"WebFetch","input":{"url":"https://ai.google.dev/x"}}]}}\n'
+    )
+    assert gate.unsaved_search_debt(transcript) == 1
+
+
+# ---- evaluate_debt ----
+
+def test_debt_allows_below_the_threshold():
+    transcript = _busqueda() + _busqueda()
+    verdict = gate.evaluate_debt(transcript, threshold=3)
+    assert verdict.allow
+
+
+def test_debt_denies_at_the_threshold():
+    transcript = _busqueda() + _busqueda() + _busqueda()
+    verdict = gate.evaluate_debt(transcript, threshold=3)
+    assert not verdict.allow
+
+
+def test_debt_never_denies_when_disabled():
+    transcript = _busqueda() * 9
+    assert gate.evaluate_debt(transcript, threshold=0).allow
+
+
+def test_debt_allows_an_unreadable_transcript():
+    # Falla abierto: un fallo del propio gate no puede atascar el trabajo.
+    assert gate.evaluate_debt("{no es json\n", threshold=1).allow
