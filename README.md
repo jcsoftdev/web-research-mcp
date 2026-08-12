@@ -63,7 +63,26 @@ Other hosts (JSON config):
 
 Freshness is a **structured field** (`status_tag`, `stale`) placed first in every
 response, and a stale entry carries an explicit `advice` field — the model can't
-overlook deprecation buried in prose. A cache miss is a flat `{"exists": false}`.
+overlook deprecation buried in prose.
+
+### Actionable misses
+
+A miss is `{"exists": false}` plus a `nearby` list of what *is* cached for that
+tech, when anything is:
+
+```json
+{"exists": false,
+ "nearby": [{"tech": "openrouter", "topic": "free-models",
+             "slug": "openrouter/free-models", "similarity": 0.43}]}
+```
+
+A bare `exists: false` cannot distinguish *never researched* from *you
+misspelled the slug*, and a caller who can't tell the two apart stops calling —
+the cache goes unused rather than getting corrected. `nearby` prefers other
+topics under the same tech; only when the tech itself is unknown does it look
+for a near-miss on the tech name (`open-router` → `openrouter`). It is omitted
+entirely when nothing is close, so an empty cache still answers a flat
+`{"exists": false}`.
 
 ### Topic canonicalization
 
@@ -108,10 +127,17 @@ you do. Detects tracked techs via strong signals only (real JS/TS imports or
 `package.json` dependency keys — never prose) and checks the session
 transcript for a prior `check_reference` / `get_reference` call.
 
-**Save-debt gate** (Claude Code only) — the way out. A `PostToolUse` reminder
-loses to whatever the model is currently chasing: measured in a real session,
-six consecutive searches produced six reminders and zero `save_research` calls.
-A deny does not lose. Set `WEB_RESEARCH_SEARCH_DEBT=N` and the Nth search with
+**Post-search reminder** (Claude Code only) — after every `WebSearch` /
+`WebFetch`, a `PostToolUse` note asks for the finding to be cached. It fills in
+what it can already tell: a `WebFetch` reminder names the tech derived from the
+host (`pkg.go.dev` → `tech="go"`, `docs.python.org` → `tech="python"`), and a
+`WebSearch` reminder quotes the query. A guess costs one correction; no
+suggestion at all costs the save.
+
+**Save-debt gate** (Claude Code only) — the harder version, because a reminder
+still loses to whatever the model is currently chasing: measured in a real
+session, six consecutive searches produced six reminders and zero
+`save_research` calls. A deny does not lose. Set `WEB_RESEARCH_SEARCH_DEBT=N` and the Nth search with
 no intervening `save_research` is refused until the earlier ones are cached.
 
 Off by default (`0`). `3` tolerates a one-off lookup and stops a chain. It

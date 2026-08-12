@@ -3,8 +3,9 @@
 Every tool delegates to the repository and shapes the response so the host
 model cannot overlook freshness: ``status_tag`` and ``stale`` come first as
 structured fields, and a stale entry carries an explicit ``advice`` field.
-A cache miss is a flat ``{"exists": False}`` — no auto-exploration, no
-suggestion to hit the web. That decision belongs to the user.
+A cache miss is ``{"exists": False}``, plus a ``nearby`` list of what IS
+cached for that tech when there is any — enough to correct a wrong slug, and
+never a suggestion to hit the web. That decision belongs to the user.
 """
 
 from __future__ import annotations
@@ -39,7 +40,9 @@ INSTRUCTIONS_BASE = (
     "discover what is cached and search_reference when you don't know the exact "
     "topic. Only research the web (and then save_research) when the user asks. "
     "When save_research returns possible_duplicates, reuse an existing slug "
-    "instead of forking a near-duplicate topic name."
+    "instead of forking a near-duplicate topic name. A miss that carries a "
+    "`nearby` list means that tech IS cached under other topic names — read "
+    "them before concluding the cache has nothing."
 )
 
 UPDATE_INSTRUCTION = (
@@ -88,9 +91,21 @@ def _coerce_sources(sources) -> list[str]:
     return [str(s) for s in sources]
 
 
-def _shape_check(res: dict) -> dict:
+def _miss(nearby: list[dict] | None) -> dict:
+    """A miss that says what IS cached nearby, when anything is.
+
+    A bare `exists: false` cannot distinguish "never researched" from "you
+    misspelled the slug", and a caller who cannot distinguish them stops
+    calling at all — the cache goes unused rather than being corrected.
+    Omitted entirely when there is nothing close, so a genuinely empty answer
+    stays empty rather than growing a noisy field.
+    """
+    return {"exists": False, "nearby": nearby} if nearby else {"exists": False}
+
+
+def _shape_check(res: dict, nearby: list[dict] | None = None) -> dict:
     if not res.get("exists"):
-        return {"exists": False}
+        return _miss(nearby)
     shaped = {
         "status_tag": res["status_tag"],
         "stale": res["stale"],
@@ -128,9 +143,9 @@ def _shape_get(entry: ResearchEntry | None) -> dict:
     return shaped
 
 
-def _shape_resolve(res: dict) -> dict:
+def _shape_resolve(res: dict, nearby: list[dict] | None = None) -> dict:
     if not res.get("exists"):
-        return {"exists": False}
+        return _miss(nearby)
     shaped = {
         "status_tag": res["status_tag"],
         "stale": res["stale"],
@@ -145,6 +160,13 @@ def _shape_resolve(res: dict) -> dict:
     if res["stale"]:
         shaped["advice"] = STALE_ADVICE
     return shaped
+
+
+def _nearby_for(repo: Repository, res: dict, tech: str, topic: str) -> list[dict] | None:
+    """Only looked up on a miss — a hit already has what the caller asked for."""
+    if res.get("exists") or not tech:
+        return None
+    return repo.nearby(tech, topic) or None
 
 
 def build_server(repo: Repository, update_checker=None, advertise_updates: bool = True) -> FastMCP:
@@ -162,7 +184,8 @@ def build_server(repo: Repository, update_checker=None, advertise_updates: bool 
         """Cheap existence/freshness check — call BEFORE any web research.
         resolve_reference does check+fetch in one call. Omit version for the latest.
         """
-        return _shape_check(repo.check_reference(tech, topic, version=_coerce_version(version)))
+        res = repo.check_reference(tech, topic, version=_coerce_version(version))
+        return _shape_check(res, nearby=_nearby_for(repo, res, tech, topic))
 
     @mcp.tool()
     def check_reference_batch(items: list[dict]) -> dict:
@@ -172,7 +195,11 @@ def build_server(repo: Repository, update_checker=None, advertise_updates: bool 
         results = []
         for res in repo.check_reference_batch(items):
             echo = {k: res[k] for k in ("tech", "topic", "version") if k in res}
-            echo.update(_shape_check(res))
+            echo.update(
+                _shape_check(
+                    res, nearby=_nearby_for(repo, res, res.get("tech", ""), res.get("topic", ""))
+                )
+            )
             results.append(echo)
         return {"results": results}
 
@@ -188,11 +215,10 @@ def build_server(repo: Repository, update_checker=None, advertise_updates: bool 
         miss — only then research the web and save_research. max_age_days overrides
         the entry TTL for this call (a JS framework moves fast, Go stdlib does not).
         """
-        return _shape_resolve(
-            repo.resolve_reference(
-                tech, topic, version=_coerce_version(version), max_age_days=max_age_days
-            )
+        res = repo.resolve_reference(
+            tech, topic, version=_coerce_version(version), max_age_days=max_age_days
         )
+        return _shape_resolve(res, nearby=_nearby_for(repo, res, tech, topic))
 
     @mcp.tool()
     def get_reference(slug: str, section: str | None = None) -> dict:

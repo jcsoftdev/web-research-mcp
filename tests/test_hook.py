@@ -286,3 +286,60 @@ def test_debt_gate_off_by_default(tmp_path):
     code, _, _ = hook.run("claude", _evento_busqueda(t), connect(":memory:"))
 
     assert code == 0
+
+
+# ---- el recordatorio nombra la llamada que hay que hacer ----
+#
+# Medido en sesión real: seis búsquedas, seis recordatorios genéricos, cero
+# save_research. Un recordatorio que no dice CON QUÉ argumentos llamar deja
+# ese trabajo al modelo justo cuando está ocupado en otra cosa.
+
+def _contexto(raw: str) -> str:
+    _, out, _ = hook.run("claude", raw, _repo_with("nextjs").conn)
+    return json.loads(out)["hookSpecificOutput"]["additionalContext"]
+
+
+def test_el_recordatorio_saca_la_tech_del_dominio():
+    ctx = _contexto(json.dumps({
+        "tool_name": "WebFetch",
+        "tool_input": {"url": "https://openrouter.ai/docs/models"},
+        "tool_response": {"content": "..."},
+    }))
+    assert 'tech="openrouter"' in ctx
+
+
+def test_el_recordatorio_ignora_subdominios_de_documentacion():
+    ctx = _contexto(json.dumps({
+        "tool_name": "WebFetch",
+        "tool_input": {"url": "https://docs.python.org/3/library/asyncio.html"},
+        "tool_response": {"content": "..."},
+    }))
+    assert 'tech="python"' in ctx
+
+
+def test_el_recordatorio_cita_la_busqueda():
+    ctx = _contexto(json.dumps({
+        "tool_name": "WebSearch",
+        "tool_input": {"query": "groq rate limits 2026"},
+        "tool_response": {"results": []},
+    }))
+    assert "groq rate limits 2026" in ctx
+    assert "save_research" in ctx
+
+
+def test_sin_dominio_reconocible_sigue_habiendo_recordatorio():
+    ctx = _contexto(json.dumps({
+        "tool_name": "WebSearch",
+        "tool_input": {"query": "cómo se hace esto"},
+        "tool_response": {"results": []},
+    }))
+    assert "save_research" in ctx
+
+
+def test_el_recordatorio_acierta_con_dominios_de_tres_etiquetas():
+    ctx = _contexto(json.dumps({
+        "tool_name": "WebFetch",
+        "tool_input": {"url": "https://pkg.go.dev/net/http"},
+        "tool_response": {"content": "..."},
+    }))
+    assert 'tech="go"' in ctx
